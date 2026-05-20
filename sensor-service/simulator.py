@@ -18,7 +18,6 @@ print("Duke nisur gjenerimin e të dhënave nga sensorët...")
 try:
     while True:
         for sensor in sensor_ids:
-            # Gjenerimi i të dhënave të simuluara
             data = {
                 "sensor_id": sensor,
                 "timestamp": datetime.utcnow().isoformat(),
