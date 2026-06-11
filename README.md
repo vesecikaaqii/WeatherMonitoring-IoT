@@ -1,6 +1,7 @@
 <table border="0">
  <tr>
-    <td><img src="https://upload.wikimedia.org/wikipedia/commons/thumb/e/e1/University_of_Prishtina_logo.svg/1200px-University_of_Prishtina_logo.svg.png" width="150" alt="University Logo" /></td>
+    <td><img src="https://github.com/user-attachments/assets/9002855f-3f97-4b41-a180-85d1e24ad34a" alt="University Logo" width="110" align="left"/></td>
+    <td>
     <td>
       <p>Universiteti i Prishtinës</p>
       <p>Fakulteti i Inxhinierisë Elektrike dhe Kompjuterike</p>
