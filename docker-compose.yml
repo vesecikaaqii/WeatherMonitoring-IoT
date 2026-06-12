@@ -1,0 +1,178 @@
+# ==========================================================================
+# Weather Monitoring IoT - Docker Compose
+# --------------------------------------------------------------------------
+# Full pipeline:
+#   zookeeper -> kafka -> cassandra -> spark-master/worker
+#   simulator-api (FastAPI producer) -> streamlit-dashboard
+#
+# Quick start:
+#   cp .env.example .env
+#   docker compose up -d zookeeper kafka cassandra
+#   docker exec -it cassandra cqlsh -f /scripts/cassandra_setup.cql
+#   docker exec -it kafka bash /scripts/kafka_topics.sh
+#   docker compose up -d --build simulator-api dashboard spark-master spark-worker
+#
+# Spark job submission:
+#   docker exec -it spark-master /opt/spark/bin/spark-submit \
+#     --master spark://spark-master:7077 \
+#     --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 \
+#     /app/stream-processing/spark_processor.py
+# ==========================================================================
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Internal listener for Docker containers: kafka:29092
+      # External listener for host machine: localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - ./infrastructure:/scripts
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      CASSANDRA_CLUSTER_NAME: weather-cluster
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
+    volumes:
+      - ./infrastructure:/scripts
+      - cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD", "cqlsh", "-e", "DESCRIBE KEYSPACES"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+
+  spark-master:
+    image: spark:3.5.0
+    container_name: spark-master
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.master.Master
+      --host spark-master
+      --port 7077
+      --webui-port 8080
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: weather_data
+      KAFKA_TOPIC_ALERTS: weather_alerts
+      KAFKA_TOPIC_PERFORMANCE: performance_metrics
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_KEYSPACE: weather_ks
+      SPARK_CHECKPOINT_DIR: /tmp/spark-checkpoints
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./:/app
+    depends_on:
+      - kafka
+      - cassandra
+
+  spark-worker:
+    image: spark:3.5.0
+    container_name: spark-worker
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077
+      --cores 2
+      --memory 1G
+      --webui-port 8081
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: weather_data
+      KAFKA_TOPIC_ALERTS: weather_alerts
+      KAFKA_TOPIC_PERFORMANCE: performance_metrics
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_KEYSPACE: weather_ks
+      SPARK_CHECKPOINT_DIR: /tmp/spark-checkpoints
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./:/app
+    depends_on:
+      - spark-master
+
+  simulator-api:
+    build:
+      context: .
+      dockerfile: sensor-service/Dockerfile
+    container_name: simulator-api
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: weather_data
+      KAFKA_TOPIC_ALERTS: weather_alerts
+      KAFKA_TOPIC_PERFORMANCE: performance_metrics
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_KEYSPACE: weather_ks
+      SIMULATOR_API_PORT: 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - kafka
+      - cassandra
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: frontend-dashboard/Dockerfile
+    container_name: dashboard
+    environment:
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_KEYSPACE: weather_ks
+      # Internal URL for API calls; public URL for the browser-clickable link.
+      SIMULATOR_API_URL: http://simulator-api:8000
+      SIMULATOR_API_PUBLIC_URL: http://localhost:8000/docs
+    ports:
+      - "8501:8501"
+    depends_on:
+      - cassandra
+      - simulator-api
+
+  # Mobile-first PWA: open http://<host>:8600 on a phone browser.
+  mobile-dashboard:
+    build:
+      context: .
+      dockerfile: mobile-dashboard/Dockerfile
+    container_name: mobile-dashboard
+    environment:
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_KEYSPACE: weather_ks
+      SIMULATOR_API_URL: http://simulator-api:8000
+      MOBILE_API_PORT: 8600
+    ports:
+      - "8600:8600"
+    depends_on:
+      - cassandra
+      - simulator-api
+
+volumes:
+  cassandra-data:

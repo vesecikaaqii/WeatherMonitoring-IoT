@@ -1,0 +1,3 @@
+# Spark Structured Streaming checkpoint directory.
+# Kafka offsets and state are stored here so the job can recover after restart.
+# Contents are runtime-generated and should not be committed.

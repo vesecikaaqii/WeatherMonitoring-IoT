@@ -1,0 +1,5 @@
+# Streamlit dashboard
+streamlit==1.33.0
+pandas==2.2.1
+cassandra-driver==3.29.1
+requests==2.31.0

@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!-- mobile-first: scale to device width, no zoom jank -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0e7490" />
+  <link rel="manifest" href="/static/manifest.json" />
+  <title>Weather IoT — Mobile</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0; font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+      background: #0b1220; color: #e5edf5; padding-bottom: 72px;
+    }
+    header {
+      position: sticky; top: 0; z-index: 10;
+      background: linear-gradient(135deg, #0e7490, #0369a1);
+      padding: 14px 16px; box-shadow: 0 2px 8px rgba(0,0,0,.4);
+    }
+    header h1 { margin: 0; font-size: 18px; }
+    header small { opacity: .85; font-size: 12px; }
+    main { padding: 14px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .card {
+      background: #16213a; border-radius: 14px; padding: 14px;
+      border: 1px solid #22304d;
+    }
+    .kpi .v { font-size: 26px; font-weight: 700; }
+    .kpi .l { font-size: 12px; opacity: .75; margin-top: 2px; }
+    .row {
+      background: #16213a; border-radius: 12px; padding: 12px;
+      margin-bottom: 8px; border-left: 4px solid #3b82f6;
+    }
+    .row .top { display: flex; justify-content: space-between; align-items: center; }
+    .row .city { font-weight: 700; font-size: 15px; }
+    .row .meta { font-size: 12px; opacity: .7; margin-top: 4px; }
+    .vals { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: 12px; }
+    .vals span { background: #0e1a30; padding: 4px 8px; border-radius: 8px; }
+    .badge { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
+    .NORMAL   { background: #14532d; color: #86efac; }
+    .WARNING  { background: #78350f; color: #fcd34d; }
+    .CRITICAL { background: #7f1d1d; color: #fca5a5; }
+    .alarm.WARNING  { border-left-color: #f59e0b; }
+    .alarm.CRITICAL { border-left-color: #ef4444; }
+    .alarm.NORMAL   { border-left-color: #22c55e; }
+    nav {
+      position: fixed; bottom: 0; left: 0; right: 0; display: flex;
+      background: #0e1726; border-top: 1px solid #22304d;
+      overflow-x: auto; -webkit-overflow-scrolling: touch;
+    }
+    nav button {
+      flex: 0 0 auto; min-width: 64px; background: none; border: none; color: #9fb3c8;
+      padding: 10px 6px; font-size: 11px; cursor: pointer;
+    }
+    nav button.active { color: #38bdf8; }
+    nav button .ic { font-size: 19px; display: block; }
+    .form label { display: block; font-size: 12px; opacity: .75; margin: 10px 0 3px; }
+    .form input, .form select {
+      width: 100%; padding: 9px; border-radius: 8px; border: 1px solid #22304d;
+      background: #0e1a30; color: #e5edf5; font-size: 14px;
+    }
+    .form .citybox { display: flex; flex-wrap: wrap; }
+    .form .citybox label {
+      display: inline-flex; align-items: center; gap: 4px;
+      margin: 3px 10px 3px 0; opacity: 1; font-size: 13px;
+    }
+    .form .citybox input { width: auto; }
+    .ctrlbtn {
+      width: 100%; padding: 16px; border: none; border-radius: 12px;
+      font-size: 16px; font-weight: 700; margin-bottom: 10px; color: #fff;
+    }
+    .start { background: #16a34a; } .stop { background: #dc2626; }
+    .muted { opacity: .6; font-size: 13px; text-align: center; margin-top: 20px; }
+    .filters { display: flex; gap: 6px; margin-bottom: 10px; }
+    .filters button {
+      flex: 1; padding: 8px; border-radius: 8px; border: 1px solid #22304d;
+      background: #16213a; color: #cbd5e1; font-size: 12px;
+    }
+    .filters button.on { background: #0369a1; color: #fff; border-color: #0369a1; }
+    .filters select {
+      flex: 1; padding: 9px; border-radius: 8px; border: 1px solid #22304d;
+      background: #16213a; color: #e5edf5; font-size: 13px;
+    }
+    svg.chart { background: #0e1a30; border-radius: 8px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Weather Monitoring IoT</h1>
+    <small>Kosovo • mobile dashboard</small>
+  </header>
+
+  <main id="view"><p class="muted">Loading…</p></main>
+
+  <nav>
+    <button data-tab="overview" class="active"><span class="ic"></span>Overview</button>
+    <button data-tab="sensors"><span class="ic"></span>Sensors</button>
+    <button data-tab="trends"><span class="ic"></span>Trends</button>
+    <button data-tab="alarms"><span class="ic"></span>Alarms</button>
+    <button data-tab="ai"><span class="ic"></span>AI</button>
+    <button data-tab="performance"><span class="ic"></span>Perf</button>
+    <button data-tab="control"><span class="ic"></span>Control</button>
+  </nav>
+
+  <script>
+    let TAB = "overview";
+    let ALARM_FILTER = "";
+    let TREND_CITY = "Prishtina";
+    let TREND_DATE = null;
+    let AI_CITY = "Prishtina";
+    const SENSOR_MAP = {
+      "Prishtina": "PR-001", "Prizren": "PZ-001", "Peja": "PE-001",
+      "Gjakova": "GJ-001", "Mitrovica": "MI-001", "Gjilan": "GL-001",
+      "Ferizaj": "FE-001", "Podujeva": "PD-001", "Vushtrri": "VU-001"
+    };
+
+    async function getJSON(url) {
+      try { const r = await fetch(url); return await r.json(); }
+      catch (e) { return null; }
+    }
+    async function postJSON(url, body) {
+      try {
+        const opts = { method: "POST" };
+        if (body) { opts.headers = { "Content-Type": "application/json" }; opts.body = JSON.stringify(body); }
+        const r = await fetch(url, opts);
+        return await r.json();
+      } catch (e) { return { error: String(e) }; }
+    }
+    const CITIES = () => Object.keys(SENSOR_MAP);
+
+    function fmt(v) { return (v === null || v === undefined) ? "–" : v; }
+
+    async function renderOverview() {
+      const d = await getJSON("/api/overview") || {};
+      return `<div class="grid">
+        ${kpi(d.total_sensors, "Total sensors")}
+        ${kpi(d.active_sensors, "Active sensors")}
+        ${kpi(d.active_alarms, "Active alarms")}
+        ${kpi(d.latest_readings, "Latest readings")}
+        ${kpi(d.avg_latency_ms, "Avg latency (ms)")}
+        ${kpi(d.messages_per_second, "Msg/s (live)")}
+      </div>`;
+    }
+    function kpi(v, l) {
+      return `<div class="card kpi"><div class="v">${fmt(v)}</div><div class="l">${l}</div></div>`;
+    }
+
+    async function renderSensors() {
+      const list = await getJSON("/api/latest") || [];
+      if (!list.length) return `<p class="muted">No readings yet. Start the simulator + Spark job.</p>`;
+      return list.map(r => `
+        <div class="row" style="border-left-color:${sevColor(r.severity)}">
+          <div class="top">
+            <span class="city">${fmt(r.city)} <small style="opacity:.6">${fmt(r.sensor_id)}</small></span>
+            <span class="badge ${r.severity||'NORMAL'}">${r.severity||'NORMAL'}</span>
+          </div>
+          <div class="vals">
+            <span> ${fmt(r.temperature)}°C</span>
+            <span> ${fmt(r.humidity)}%</span>
+            <span> ${fmt(r.pressure)} hPa</span>
+            <span> ${fmt(r.wind_speed)} m/s</span>
+            <span> ${fmt(r.rainfall)} mm</span>
+            <span> AQI ${fmt(r.air_quality)}</span>
+            <span> ${fmt(r.battery_level)}%</span>
+          </div>
+          <div class="meta">${fmt(r.timestamp)} • anomaly: ${r.is_anomaly ? "yes" : "no"}</div>
+        </div>`).join("");
+    }
+
+    async function renderAlarms() {
+      const url = "/api/alarms" + (ALARM_FILTER ? "?severity=" + ALARM_FILTER : "");
+      const list = await getJSON(url) || [];
+      const f = (lvl) => `<button class="${ALARM_FILTER===lvl?'on':''}" onclick="setFilter('${lvl}')">${lvl||'All'}</button>`;
+      const filters = `<div class="filters">${f("")}${f("WARNING")}${f("CRITICAL")}</div>`;
+      if (!list.length) return filters + `<p class="muted">No alarms.</p>`;
+      return filters + list.map(a => `
+        <div class="row alarm ${a.severity||'NORMAL'}">
+          <div class="top">
+            <span class="city">${fmt(a.city)}</span>
+            <span class="badge ${a.severity}">${fmt(a.severity)}</span>
+          </div>
+          <div class="meta">${fmt(a.message)}</div>
+          <div class="meta">value ${fmt(a.value)} • threshold ${fmt(a.threshold)} • ${fmt(a.timestamp)}</div>
+        </div>`).join("");
+    }
+    function setFilter(lvl) { ALARM_FILTER = lvl; refresh(); }
+
+    // ---- Trends tab: historical line charts (SVG, no external libraries) ----
+    async function renderTrends() {
+      const sid = SENSOR_MAP[TREND_CITY];
+      const dates = await getJSON("/api/dates?sensor_id=" + sid) || [];
+      if (!TREND_DATE || !dates.includes(TREND_DATE)) TREND_DATE = dates[0] || null;
+
+      const citySel = `<select onchange="changeCity(this.value)">` +
+        Object.keys(SENSOR_MAP).map(c =>
+          `<option ${c === TREND_CITY ? "selected" : ""}>${c}</option>`).join("") + `</select>`;
+      const dateSel = dates.length
+        ? `<select onchange="changeDate(this.value)">` +
+            dates.map(d => `<option ${d === TREND_DATE ? "selected" : ""}>${d}</option>`).join("") +
+          `</select>`
+        : `<span class="meta">no dates</span>`;
+      const controls = `<div class="filters">${citySel}${dateSel}</div>`;
+
+      if (!TREND_DATE) {
+        return controls + `<p class="muted">No historical data yet.<br>
+          Run <code>seed_historical_readings.py</code> or the live pipeline.</p>`;
+      }
+
+      const hist = await getJSON(`/api/history?sensor_id=${sid}&date=${TREND_DATE}`) || [];
+      if (!hist.length) return controls + `<p class="muted">No data for this date.</p>`;
+
+      const summary = await renderSummary(hist);
+
+      const series = [
+        ["temperature",   "Temperature (°C)", "#f59e0b"],
+        ["humidity",      "Humidity (%)",      "#38bdf8"],
+        ["pressure",      "Pressure (hPa)",    "#a78bfa"],
+        ["wind_speed",    "Wind speed (m/s)",  "#34d399"],
+        ["rainfall",      "Rainfall (mm)",     "#60a5fa"],
+        ["air_quality",   "Air quality (AQI)", "#f472b6"],
+        ["battery_level", "Battery (%)",       "#facc15"],
+      ];
+      const charts = series.map(([k, label, color]) =>
+        chartCard(label, hist.map(r => r[k]), color)).join("");
+      return controls + summary + charts;
+    }
+    function changeCity(v) { TREND_CITY = v; TREND_DATE = null; refresh(); }
+    function changeDate(v) { TREND_DATE = v; refresh(); }
+
+    function avg(values) {
+      const n = values.map(Number).filter(v => !isNaN(v));
+      return n.length ? (n.reduce((a, b) => a + b, 0) / n.length) : null;
+    }
+
+    // Daily summary card: averages + reading/anomaly counts + alarms per city.
+    async function renderSummary(hist) {
+      const a1 = avg(hist.map(r => r.temperature));
+      const a2 = avg(hist.map(r => r.humidity));
+      const a3 = avg(hist.map(r => r.pressure));
+      const anomalies = hist.filter(r => r.is_anomaly).length;
+      const warn = hist.filter(r => r.severity === "WARNING").length;
+      const crit = hist.filter(r => r.severity === "CRITICAL").length;
+      const f = (v, u) => v === null ? "–" : v.toFixed(1) + u;
+
+      const dailyCard = `<div class="card" style="margin-bottom:10px">
+        <div class="l">Daily summary — ${TREND_CITY} · ${TREND_DATE}</div>
+        <div class="vals" style="margin-top:8px">
+          <span>🌡️ avg ${f(a1, "°C")}</span>
+          <span>💧 avg ${f(a2, "%")}</span>
+          <span>🔵 avg ${f(a3, " hPa")}</span>
+          <span>📋 readings ${hist.length}</span>
+          <span>🤖 anomalies ${anomalies}</span>
+          <span class="badge WARNING">WARN ${warn}</span>
+          <span class="badge CRITICAL">CRIT ${crit}</span>
+        </div></div>`;
+
+      // Alarms per city (across all stored alarms)
+      const counts = await getJSON("/api/alarm_counts") || [];
+      let cityCard = "";
+      if (counts.length) {
+        const maxTotal = Math.max(1, ...counts.map(c => c.total));
+        const bars = counts.filter(c => c.total > 0).map(c => `
+          <div style="margin:6px 0">
+            <div class="meta" style="display:flex;justify-content:space-between">
+              <span>${c.city}</span>
+              <span><b style="color:#fcd34d">${c.warning}W</b> /
+                    <b style="color:#fca5a5">${c.critical}C</b></span>
+            </div>
+            <div style="background:#0e1a30;border-radius:6px;height:8px;overflow:hidden">
+              <div style="height:8px;width:${(c.total / maxTotal * 100).toFixed(0)}%;
+                background:linear-gradient(90deg,#f59e0b,#ef4444)"></div>
+            </div>
+          </div>`).join("");
+        cityCard = `<div class="card" style="margin-bottom:10px">
+          <div class="l">Alarms per city (total stored)</div>
+          ${bars || '<div class="meta">no alarms yet</div>'}</div>`;
+      }
+      return dailyCard + cityCard;
+    }
+
+    function chartCard(label, values, color) {
+      return `<div class="card" style="margin-bottom:10px">
+        <div class="l">${label}</div>${sparkline(values, color)}</div>`;
+    }
+    function sparkline(values, color) {
+      const nums = values
+        .map(v => (v === null || v === undefined) ? null : Number(v))
+        .filter(v => v !== null && !isNaN(v));
+      if (nums.length < 2) return `<div class="meta">not enough data</div>`;
+      const W = 320, H = 80, pad = 6;
+      const min = Math.min(...nums), max = Math.max(...nums);
+      const range = (max - min) || 1;
+      const stepX = (W - 2 * pad) / (nums.length - 1);
+      const pts = nums.map((v, i) => {
+        const x = pad + i * stepX;
+        const y = pad + (H - 2 * pad) * (1 - (v - min) / range);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      }).join(" ");
+      return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="100%" height="80"
+                preserveAspectRatio="none">
+          <polyline fill="none" stroke="${color}" stroke-width="2"
+            stroke-linejoin="round" points="${pts}"/>
+        </svg>
+        <div class="meta">min ${min.toFixed(1)} • max ${max.toFixed(1)} •
+          last ${nums[nums.length - 1].toFixed(1)} • n=${nums.length}</div>`;
+    }
+
+    // ---- AI / Prediction tab ----
+    function changeAICity(v) { AI_CITY = v; refresh(); }
+    async function renderAI() {
+      const d = await getJSON("/api/ai") || {};
+      const sensors = d.sensors || [];
+      const flagged = d.flagged_count || 0;
+
+      const flaggedCard = `<div class="card" style="margin-bottom:10px">
+        <div class="l">Anomaly detection (IsolationForest + fallback)</div>
+        <div class="v">${flagged}</div>
+        <div class="l">sensors flagged anomalous (latest)</div></div>`;
+
+      // Temperature forecast (moving average of recent readings) for chosen city
+      const sid = SENSOR_MAP[AI_CITY];
+      const dates = await getJSON("/api/dates?sensor_id=" + sid) || [];
+      const citySel = `<div class="filters"><select onchange="changeAICity(this.value)">` +
+        CITIES().map(c => `<option ${c === AI_CITY ? "selected" : ""}>${c}</option>`).join("") +
+        `</select></div>`;
+      let forecastCard = `<p class="muted">No history yet for a forecast.</p>`;
+      if (dates.length) {
+        const hist = await getJSON(`/api/history?sensor_id=${sid}&date=${dates[0]}`) || [];
+        const temps = hist.map(r => Number(r.temperature)).filter(v => !isNaN(v));
+        if (temps.length >= 3) {
+          const w = temps.slice(-10);
+          const pred = w.reduce((a, b) => a + b, 0) / w.length;
+          forecastCard = `<div class="card" style="margin-bottom:10px">
+            <div class="l">Temperature forecast — ${AI_CITY}</div>
+            <div class="v">${pred.toFixed(2)} °C</div>
+            <div class="meta">moving average of last ${w.length} readings • ${dates[0]}</div>
+            ${sparkline(temps, "#f59e0b")}</div>`;
+        }
+      }
+
+      const list = sensors.map(r => `
+        <div class="row" style="border-left-color:${r.is_anomaly ? '#ef4444' : '#22c55e'}">
+          <div class="top">
+            <span class="city">${fmt(r.city)} <small style="opacity:.6">${fmt(r.sensor_id)}</small></span>
+            <span class="badge ${r.is_anomaly ? 'CRITICAL' : 'NORMAL'}">${r.is_anomaly ? 'ANOMALY' : 'OK'}</span>
+          </div>
+          <div class="meta">temp ${fmt(r.temperature)}°C • severity ${fmt(r.severity)}</div>
+        </div>`).join("");
+
+      return flaggedCard + citySel + forecastCard +
+        `<div class="l" style="margin:4px 0 8px">Per-sensor status</div>` + list;
+    }
+
+    // ---- Performance tab ----
+    async function renderPerformance() {
+      const d = await getJSON("/api/performance") || {};
+      const labels = {
+        stream: "Spark Streaming Metrics",
+        stress: "Stress Test Metrics",
+        normal: "Normal Mode Metrics",
+      };
+      let html = "", any = false;
+      for (const mode of ["stream", "stress", "normal"]) {
+        const m = d[mode];
+        if (!m || !m.count) continue;
+        any = true;
+        html += `<div class="card" style="margin-bottom:10px">
+          <div class="l">${labels[mode]}</div>
+          <div class="meta">total processed: ${m.total_processed} • samples: ${m.count}</div>
+          <div class="l" style="margin-top:8px">Messages / second</div>${sparkline(m.mps, "#34d399")}
+          <div class="l" style="margin-top:8px">Avg latency (ms)</div>${sparkline(m.latency, "#f472b6")}
+        </div>`;
+      }
+      if (!any) return `<p class="muted">No performance data yet.<br>
+        Start the Spark job or run a stress test from the Control tab.</p>`;
+      return html;
+    }
+
+    // ---- Simulator Control tab (full config + stress test) ----
+    async function renderControl() {
+      const s = await getJSON("/api/sim/status") || {};
+      const cfg = await getJSON("/api/sim/config") || {};
+      const running = s.running ? "RUNNING" : "stopped";
+      const selected = cfg.cities || CITIES();
+      const opt = (v, cur) => `<option ${v === cur ? "selected" : ""}>${v}</option>`;
+      const cityChecks = CITIES().map(c =>
+        `<label><input type="checkbox" class="cityck" value="${c}" ${selected.includes(c) ? "checked" : ""}> ${c}</label>`
+      ).join("");
+
+      return `
+        <div class="card" style="margin-bottom:10px">
+          <div class="l">Simulator status</div>
+          <div class="v" style="font-size:22px">${running}</div>
+          <div class="meta">sent: ${fmt(s.messages_sent)} • ${fmt(s.messages_per_second)} msg/s • mode: ${fmt(s.mode)}</div>
+        </div>
+        <button class="ctrlbtn start" onclick="ctrl('start')">Start simulator</button>
+        <button class="ctrlbtn stop" onclick="ctrl('stop')">Stop simulator</button>
+
+        <div class="card form" style="margin-bottom:10px">
+          <div class="l">Configuration</div>
+          <label>Mode</label>
+          <select id="cfgMode">${opt("normal", cfg.mode)}${opt("stress", cfg.mode)}</select>
+          <label>Number of sensors</label>
+          <input id="cfgNum" type="number" min="1" max="9" value="${fmt(cfg.num_sensors)}">
+          <label>Interval seconds (normal mode)</label>
+          <input id="cfgInt" type="number" step="0.1" value="${fmt(cfg.interval_seconds)}">
+          <label>Messages/sec (stress mode)</label>
+          <input id="cfgMps" type="number" value="${fmt(cfg.messages_per_second)}">
+          <label>Anomaly rate (0–1)</label>
+          <input id="cfgAnom" type="number" step="0.05" min="0" max="1" value="${fmt(cfg.anomaly_rate)}">
+          <label>Cities</label>
+          <div class="citybox">${cityChecks}</div>
+          <button class="ctrlbtn" style="background:#0369a1;margin-top:12px" onclick="applyCfg()">Apply config</button>
+          <div id="cfgRes" class="meta"></div>
+        </div>
+
+        <div class="card form" style="margin-bottom:10px">
+          <div class="l">Stress test</div>
+          <label>Target messages/sec</label>
+          <input id="stMps" type="number" value="500">
+          <label>Duration (seconds)</label>
+          <input id="stDur" type="number" value="30">
+          <button class="ctrlbtn" style="background:#b45309;margin-top:12px" onclick="runStress()">Run stress test</button>
+          <div id="stRes" class="meta"></div>
+        </div>`;
+    }
+    async function ctrl(action) { await postJSON("/api/sim/" + action); refresh(); }
+
+    async function applyCfg() {
+      const cities = [...document.querySelectorAll(".cityck:checked")].map(x => x.value);
+      const payload = {
+        mode: document.getElementById("cfgMode").value,
+        num_sensors: parseInt(document.getElementById("cfgNum").value),
+        interval_seconds: parseFloat(document.getElementById("cfgInt").value),
+        messages_per_second: parseInt(document.getElementById("cfgMps").value),
+        anomaly_rate: parseFloat(document.getElementById("cfgAnom").value),
+        cities: cities,
+      };
+      const res = await postJSON("/api/sim/config", payload);
+      document.getElementById("cfgRes").textContent =
+        res.updated ? "Configuration updated successfully." : "⚠️ " + JSON.stringify(res);
+    }
+
+    async function runStress() {
+      const payload = {
+        messages_per_second: parseInt(document.getElementById("stMps").value),
+        duration_seconds: parseInt(document.getElementById("stDur").value),
+        anomaly_rate: 0.1,
+      };
+      const res = await postJSON("/api/sim/stress-test", payload);
+      document.getElementById("stRes").textContent = res.started
+        ? `Stress test running: ${payload.messages_per_second} msg/s for ${payload.duration_seconds}s. See Performance tab.`
+        : "⚠️ " + JSON.stringify(res);
+    }
+
+    function sevColor(s) {
+      return s === "CRITICAL" ? "#ef4444" : s === "WARNING" ? "#f59e0b" : "#22c55e";
+    }
+
+    async function refresh() {
+      const view = document.getElementById("view");
+      let html = "";
+      if (TAB === "overview") html = await renderOverview();
+      else if (TAB === "sensors") html = await renderSensors();
+      else if (TAB === "trends") html = await renderTrends();
+      else if (TAB === "alarms") html = await renderAlarms();
+      else if (TAB === "ai") html = await renderAI();
+      else if (TAB === "performance") html = await renderPerformance();
+      else if (TAB === "control") html = await renderControl();
+      view.innerHTML = html;
+    }
+
+    document.querySelectorAll("nav button").forEach(b => {
+      b.addEventListener("click", () => {
+        document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
+        b.classList.add("active");
+        TAB = b.dataset.tab;
+        refresh();
+      });
+    });
+
+    refresh();
+    // auto-refresh every 5s, except on Trends/Control (so selections & form edits
+    // aren't interrupted while the user is interacting with them)
+    setInterval(() => { if (TAB !== "trends" && TAB !== "control") refresh(); }, 5000);
+  </script>
+</body>
+</html>

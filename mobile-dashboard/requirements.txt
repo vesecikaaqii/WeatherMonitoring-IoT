@@ -1,0 +1,5 @@
+# Mobile dashboard (FastAPI backend + PWA frontend)
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+cassandra-driver==3.29.1
+requests==2.31.0

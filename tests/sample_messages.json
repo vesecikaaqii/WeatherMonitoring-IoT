@@ -1,0 +1,47 @@
+[
+  {
+    "event_id": "11111111-1111-1111-1111-111111111111",
+    "sensor_id": "PR-001",
+    "city": "Prishtina",
+    "location": { "latitude": 42.6629, "longitude": 21.1655 },
+    "timestamp": "2026-06-12T12:30:00Z",
+    "temperature": 24.5,
+    "humidity": 55.2,
+    "pressure": 1012.4,
+    "wind_speed": 4.8,
+    "rainfall": 0.0,
+    "air_quality": 35.0,
+    "battery_level": 87.0,
+    "producer_timestamp_ms": 1781001000000
+  },
+  {
+    "event_id": "22222222-2222-2222-2222-222222222222",
+    "sensor_id": "PE-001",
+    "city": "Peja",
+    "location": { "latitude": 42.6593, "longitude": 20.2887 },
+    "timestamp": "2026-06-12T12:30:05Z",
+    "temperature": 41.8,
+    "humidity": 88.0,
+    "pressure": 1009.0,
+    "wind_speed": 12.0,
+    "rainfall": 0.0,
+    "air_quality": 60.0,
+    "battery_level": 90.0,
+    "producer_timestamp_ms": 1781001005000
+  },
+  {
+    "event_id": "33333333-3333-3333-3333-333333333333",
+    "sensor_id": "GL-001",
+    "city": "Gjilan",
+    "location": { "latitude": 42.4637, "longitude": 21.4694 },
+    "timestamp": "2026-06-12T12:30:10Z",
+    "temperature": 18.0,
+    "humidity": 60.0,
+    "pressure": 975.0,
+    "wind_speed": 16.5,
+    "rainfall": 35.0,
+    "air_quality": 160.0,
+    "battery_level": 8.0,
+    "producer_timestamp_ms": 1781001010000
+  }
+]
