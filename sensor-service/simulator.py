@@ -78,16 +78,30 @@ class WeatherSimulator:
     # Kafka producer lifecycle
     # ------------------------------------------------------------------ #
     def _connect(self):
-        """Lazily create the Kafka producer (retries make startup resilient)."""
+        """
+        Lazily create the Kafka producer.
+
+        PRODUCER-SIDE OPTIMIZATION (all env-tunable, so you can optimize without
+        editing code):
+          - linger_ms     : wait this long to fill a batch -> bigger batches,
+                            higher throughput (small latency cost). [PRODUCER_LINGER_MS]
+          - batch_size    : max bytes per partition batch.          [PRODUCER_BATCH_SIZE]
+          - compression   : gzip/lz4/snappy -> less network I/O, more msg/s.
+                            [PRODUCER_COMPRESSION]
+          - acks=1        : leader ack only -> faster than acks=all. [PRODUCER_ACKS]
+        """
         if self.producer is None:
             from kafka import KafkaProducer  # imported here so generation works without kafka-python
+            acks = os.getenv("PRODUCER_ACKS", "1")
             self.producer = KafkaProducer(
                 bootstrap_servers=self.bootstrap_servers.split(","),
                 value_serializer=lambda v: json.dumps(v).encode("utf-8"),
                 key_serializer=lambda k: k.encode("utf-8") if k else None,
                 retries=5,
-                linger_ms=5,             # small batching window for throughput
-                acks=1,
+                linger_ms=int(os.getenv("PRODUCER_LINGER_MS", "10")),
+                batch_size=int(os.getenv("PRODUCER_BATCH_SIZE", "32768")),
+                compression_type=os.getenv("PRODUCER_COMPRESSION", "gzip"),
+                acks=int(acks) if acks.isdigit() else acks,
             )
         return self.producer
 

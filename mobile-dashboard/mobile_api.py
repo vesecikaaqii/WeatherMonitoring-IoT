@@ -162,6 +162,18 @@ def latest():
     return JSONResponse(data)
 
 
+@app.get("/api/metadata")
+def metadata():
+    """Static sensor description from the sensor_metadata table."""
+    data = rows(
+        "SELECT sensor_id, city, manufacturer, model, serial_number, "
+        "sensor_type, installation_date, status, sampling_frequency_seconds "
+        "FROM sensor_metadata"
+    )
+    data.sort(key=lambda r: r.get("sensor_id") or "")
+    return JSONResponse(data)
+
+
 @app.get("/api/dates")
 def dates(sensor_id: str):
     """Return the available date partitions for a sensor (newest first)."""

@@ -12,6 +12,7 @@
 --   * recent alarms (newest first)      -> alarms (PK = city, timestamp DESC)
 --   * recent performance samples        -> performance_metrics (PK = mode, timestamp DESC)
 --   * sensors by city/status            -> sensor_metadata (PK = sensor_id, index on city/status)
+--   * windowed aggregates per city      -> sensor_aggregates (PK = city, window_start DESC)
 -- ==========================================================================
 
 CREATE KEYSPACE IF NOT EXISTS weather_ks
@@ -118,3 +119,24 @@ CREATE TABLE IF NOT EXISTS performance_metrics (
     notes                    text,
     PRIMARY KEY ((mode), timestamp, metric_id)
 ) WITH CLUSTERING ORDER BY (timestamp DESC, metric_id ASC);
+
+-- --------------------------------------------------------------------------
+-- 6. sensor_aggregates : Spark Structured Streaming WINDOWED aggregations.
+--    Tumbling 1-minute windows per city (avg/min/max temperature, avg humidity
+--    & pressure, max wind, avg air quality, reading count). Upserted on the
+--    window's (city, window_start) key as the window is updated.
+-- --------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS sensor_aggregates (
+    city            text,
+    window_start    text,
+    window_end      text,
+    avg_temperature double,
+    min_temperature double,
+    max_temperature double,
+    avg_humidity    double,
+    avg_pressure    double,
+    max_wind_speed  double,
+    avg_air_quality double,
+    reading_count   bigint,
+    PRIMARY KEY ((city), window_start)
+) WITH CLUSTERING ORDER BY (window_start DESC);

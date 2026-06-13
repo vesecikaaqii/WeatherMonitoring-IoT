@@ -40,7 +40,7 @@ dashboard — with a built-in **stress-test** harness for performance analysis.
  ┌──────┴───────────┐     │  alerts  │                                          ▼
  │  Streamlit       │     │ perf_    │                              ┌────────────────────┐
  │  Dashboard       │ ◀───┴─ metrics ┘  ◀──────── reads ─────────── │ UI / AI / Alarms / │
- │ (6 pages)        │                                               │ Performance        │
+ │ (7 pages)        │                                               │ Performance        │
  └──────────────────┘                                               └────────────────────┘
 ```
 
@@ -198,6 +198,7 @@ results on the **Performance** page.
 | `latest_readings` | `sensor_id` | Newest value per sensor |
 | `alarms` | `((city), timestamp, alarm_id)` | Threshold-crossing events |
 | `performance_metrics` | `((mode), timestamp, metric_id)` | Throughput + latency samples |
+| `sensor_aggregates` | `((city), window_start)` | Windowed aggregates (1-min/city) from Spark |
 
 ## Kafka topics
 
@@ -234,12 +235,88 @@ threshold, Spark writes an alarm row with `parameter`, `value`, `threshold`,
 Thresholds (per spec): temperature ±35/±40, humidity 85/95, pressure 1000/980,
 wind 10/15 m/s, rainfall 10/30 mm, air quality 100/150, battery 20/10.
 
-## Performance metrics
+## Sensor metadata
 
-Every message carries `producer_timestamp_ms`; Spark computes
-`latency_ms = now_ms - producer_timestamp_ms`. Per micro-batch it records
-messages processed, msg/s, avg/max latency, and Cassandra write time into
-`performance_metrics`. The dashboard **Performance** page charts these over time.
+Each weather station's static description (manufacturer, model, serial number,
+sensor type, installation date, status, sampling frequency) lives in the
+`sensor_metadata` table, seeded from `sensor-service/config.py` via
+`infrastructure/seed_metadata.py`. It is shown on the **Sensor Metadata** page
+(web dashboard) and the **Meta** tab (mobile).
+
+## Spark processing & windowed aggregation
+
+Per micro-batch the Spark job **validates** (drops impossible/missing records),
+**filters** (metadata envelopes), **analyses** (severity + AI anomaly + latency)
+and writes the processed rows to Cassandra. A **second streaming query** runs a
+**windowed aggregation** — tumbling **1-minute windows per city** (avg/min/max
+temperature, avg humidity & pressure, max wind, avg air quality, reading count)
+with a 2-minute watermark — and upserts the result into `sensor_aggregates`.
+This demonstrates Spark aggregation + windowing on the live stream.
+
+## Performance metrics & optimization
+
+**What is measured.** Every message carries `producer_timestamp_ms`; Spark
+computes end-to-end `latency_ms = now_ms - producer_timestamp_ms`. Per
+micro-batch it records messages processed, msg/s, avg/max latency, and Cassandra
+write time into `performance_metrics` (mode `stream`); a stress test writes a
+summary row (mode `stress`). The dashboard **Performance** page charts these
+over time ("Spark Streaming Metrics" vs "Stress Test Metrics").
+
+**Example results** (single laptop, Docker, 3 Kafka partitions — replace with
+your measured numbers):
+
+| Mode | Target msg/s | Achieved | Avg latency | Max latency | Cassandra write |
+|------|-------------|----------|-------------|-------------|-----------------|
+| normal | ~2 | ~2 | 35 ms | 90 ms | 40 ms |
+| stress | 500 | ~480 | 410 ms | 1100 ms | 160 ms |
+| stress | 1000 | ~850 | 900 ms | 2400 ms | 320 ms |
+
+Latency rises with throughput once Spark batches and Cassandra writes become the
+bottleneck; achieved rate approaches target until a single-node broker saturates
+(~800–1000 msg/s on a laptop).
+
+**Optimization recommendations:**
+1. **Kafka partitions** — increase `weather_data` beyond 3 so more Spark
+   consumer tasks run in parallel (partitioned by `sensor_id` for per-sensor ordering).
+2. **Spark trigger interval** — tune `SPARK_TRIGGER_INTERVAL`: shorter (1–2s)
+   lowers latency, longer (5–10s) increases batch size and throughput.
+3. **Cassandra schema** — bounded partitions `((sensor_id, date), timestamp)`
+   avoid wide-partition hotspots; `latest_readings` keyed by `sensor_id` gives O(1) upserts.
+4. **Checkpointing** — keep `checkpointLocation` on fast local disk (not a
+   network share) so micro-batches don't stall.
+5. **Batching writes** — the Cassandra connector batches per micro-batch; at
+   higher scale push per-row logic into Spark UDFs/`mapPartitions` instead of `collect()`.
+6. **Producer tuning** — `linger_ms` + `acks=1` trade a little durability for
+   throughput; raise `linger_ms` for larger produce batches.
+
+### Before vs after optimization
+
+The optimization knobs are applied in code (and are env-tunable). The table
+shows what changed:
+
+| Setting | Before (default) | After (optimized) | Where |
+|---------|------------------|-------------------|-------|
+| Producer compression | none | `gzip` | `simulator.py` / `PRODUCER_COMPRESSION` |
+| Producer `linger_ms` | 5 | 10 | `PRODUCER_LINGER_MS` |
+| Producer `batch_size` | 16 KB (default) | 32 KB | `PRODUCER_BATCH_SIZE` |
+| Cassandra concurrent writes | 1 (default) | 4 | `CASS_CONCURRENT_WRITES` |
+| Cassandra batch size (rows) | default | 200, grouped by partition | `CASS_BATCH_SIZE_ROWS` |
+| Back-pressure (`maxOffsetsPerTrigger`) | unbounded | optional cap | `MAX_OFFSETS_PER_TRIGGER` |
+
+**Indicative impact** at 1000 msg/s stress (single laptop — example numbers,
+replace with your measured values):
+
+| Metric | Before optimization | After optimization |
+|--------|--------------------|--------------------|
+| Achieved throughput | ~850 msg/s | ~1000 msg/s |
+| Avg latency | ~900 ms | ~600 ms |
+| Max latency | ~2400 ms | ~1500 ms |
+| Cassandra write time | ~320 ms | ~180 ms |
+
+> The **stored data is identical** before/after — compression and write tuning
+> change *speed*, not the readings/alarms/values. To reproduce the "before"
+> state for a demo comparison, set `PRODUCER_COMPRESSION=none`,
+> `CASS_CONCURRENT_WRITES=1` in `.env` and re-run the stress test.
 
 ## Mobile dashboard (PWA)
 
@@ -252,6 +329,7 @@ only needs one URL.
 - **Full feature parity with the web dashboard.** Tabs:
   - **Overview** — KPIs (sensors, alarms, latency, msg/s)
   - **Sensors** — latest reading per city with severity colors
+  - **Meta** — sensor metadata (manufacturer, model, serial, install date…)
   - **Trends** — historical SVG line charts + daily summary + alarms per city
   - **Alarms** — filter WARNING / CRITICAL
   - **AI** — anomaly-flagged sensors + temperature forecast (moving average)

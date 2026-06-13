@@ -9,10 +9,11 @@ Control plane: Simulator FastAPI (start/stop/stress-test)
 Pages / sections (selectable from the sidebar):
   1. Overview            - KPIs: sensors, alarms, latency, throughput
   2. Live Readings       - per-city filters, latest table, line charts
-  3. Alarms              - recent alarms filtered by severity
-  4. Simulator Control   - start/stop, normal/stress, sensors, rate, anomaly
-  5. Performance         - msg/s + latency charts, processed records
-  6. AI / Prediction     - anomaly detection results + temperature forecast
+  3. Sensor Metadata     - static station info from sensor_metadata table
+  4. Alarms              - recent alarms filtered by severity
+  5. Simulator Control   - start/stop, normal/stress, sensors, rate, anomaly
+  6. Performance         - msg/s + latency charts, processed records
+  7. AI / Prediction     - anomaly detection results + temperature forecast
 
 Hosts come from environment variables -> works locally and in Docker.
 
@@ -88,8 +89,8 @@ def api_post(path, payload=None):
 st.sidebar.title("Weather IoT - Kosovo")
 page = st.sidebar.radio(
     "Navigation",
-    ["Overview", "Live Readings", "Alarms", "Simulator Control",
-     "Performance", "AI / Prediction"],
+    ["Overview", "Live Readings", "Sensor Metadata", "Alarms",
+     "Simulator Control", "Performance", "AI / Prediction"],
 )
 st.sidebar.caption(f"Cassandra: {CASSANDRA_HOST}")
 # Show a browser-clickable docs link (NOT the internal simulator-api hostname).
@@ -442,12 +443,56 @@ def page_ai():
         st.info("Not enough history to forecast yet.")
 
 
+# ==========================================================================
+# 7. SENSOR METADATA
+# ==========================================================================
+def page_metadata():
+    st.title("Sensor Metadata")
+    st.caption(
+        "Static description of each weather station, read from the Cassandra "
+        "`sensor_metadata` table (manufacturer, model, serial number, etc.)."
+    )
+
+    cols = [
+        "sensor_id", "city", "manufacturer", "model", "serial_number",
+        "sensor_type", "installation_date", "status", "sampling_frequency_seconds",
+    ]
+    meta = query_df(
+        "SELECT sensor_id, city, manufacturer, model, serial_number, "
+        "sensor_type, installation_date, status, sampling_frequency_seconds "
+        "FROM sensor_metadata"
+    )
+
+    if meta.empty:
+        st.info(
+            "No sensor metadata found. Seed it with "
+            "`python infrastructure/seed_metadata.py`."
+        )
+        return
+
+    # Keep a stable column order and sort by sensor id
+    meta = meta[[c for c in cols if c in meta.columns]].sort_values("sensor_id")
+
+    c1, c2 = st.columns(2)
+    c1.metric("Total sensors", len(meta))
+    c2.metric("Active sensors", int((meta["status"] == "active").sum()))
+
+    # Optional status filter
+    statuses = sorted(meta["status"].dropna().unique().tolist())
+    chosen = st.multiselect("Filter by status", statuses, default=statuses)
+    if chosen:
+        meta = meta[meta["status"].isin(chosen)]
+
+    st.dataframe(meta.reset_index(drop=True), use_container_width=True)
+
+
 # --------------------------------------------------------------------------
 # Router
 # --------------------------------------------------------------------------
 PAGES = {
     "Overview": page_overview,
     "Live Readings": page_live,
+    "Sensor Metadata": page_metadata,
     "Alarms": page_alarms,
     "Simulator Control": page_simulator,
     "Performance": page_performance,

@@ -96,6 +96,7 @@
   <nav>
     <button data-tab="overview" class="active"><span class="ic"></span>Overview</button>
     <button data-tab="sensors"><span class="ic"></span>Sensors</button>
+    <button data-tab="meta"><span class="ic"></span>Meta</button>
     <button data-tab="trends"><span class="ic"></span>Trends</button>
     <button data-tab="alarms"><span class="ic"></span>Alarms</button>
     <button data-tab="ai"><span class="ic"></span>AI</button>
@@ -165,6 +166,30 @@
             <span> ${fmt(r.battery_level)}%</span>
           </div>
           <div class="meta">${fmt(r.timestamp)} • anomaly: ${r.is_anomaly ? "yes" : "no"}</div>
+        </div>`).join("");
+    }
+
+    // ---- Sensor metadata tab (static station info from sensor_metadata) ----
+    async function renderMetadata() {
+      const list = await getJSON("/api/metadata") || [];
+      if (!list.length) {
+        return `<p class="muted">No sensor metadata.<br>
+          Seed it with <code>python infrastructure/seed_metadata.py</code>.</p>`;
+      }
+      return list.map(r => `
+        <div class="row" style="border-left-color:${r.status === 'active' ? '#22c55e' : '#9fb3c8'}">
+          <div class="top">
+            <span class="city">${fmt(r.city)} <small style="opacity:.6">${fmt(r.sensor_id)}</small></span>
+            <span class="badge ${r.status === 'active' ? 'NORMAL' : 'WARNING'}">${fmt(r.status)}</span>
+          </div>
+          <div class="vals">
+            <span>🏭 ${fmt(r.manufacturer)}</span>
+            <span>📦 ${fmt(r.model)}</span>
+            <span>🔖 ${fmt(r.serial_number)}</span>
+            <span>🛰️ ${fmt(r.sensor_type)}</span>
+            <span>📅 ${fmt(r.installation_date)}</span>
+            <span>⏱️ every ${fmt(r.sampling_frequency_seconds)}s</span>
+          </div>
         </div>`).join("");
     }
 
@@ -463,6 +488,7 @@
       let html = "";
       if (TAB === "overview") html = await renderOverview();
       else if (TAB === "sensors") html = await renderSensors();
+      else if (TAB === "meta") html = await renderMetadata();
       else if (TAB === "trends") html = await renderTrends();
       else if (TAB === "alarms") html = await renderAlarms();
       else if (TAB === "ai") html = await renderAI();

@@ -25,6 +25,11 @@ What this job does per micro-batch
        - performance_metrics (per-batch throughput + latency)
 8. Checkpoint Kafka offsets for exactly-once-ish recovery.
 
+A SECOND streaming query runs a WINDOWED aggregation on the same source:
+tumbling 1-minute windows per city (avg/min/max temperature, avg humidity &
+pressure, max wind, avg air quality, reading count) -> Cassandra
+`sensor_aggregates`. This demonstrates Spark aggregation + windowing.
+
 Run:
     spark-submit \
       --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,\
@@ -312,12 +317,70 @@ def process_batch(batch_df, epoch_id):
     )
 
 
+def write_aggregates(batch_df, epoch_id):
+    """
+    foreachBatch handler for the WINDOWED aggregation stream. Each batch holds
+    the (city, time-window) groups updated in this trigger; we format the window
+    bounds as ISO strings and upsert into Cassandra `sensor_aggregates`
+    (same (city, window_start) key -> the window row is kept current).
+    """
+    if batch_df.rdd.isEmpty():
+        return
+    out = batch_df.select(
+        F.col("city"),
+        F.date_format(F.col("window.start"), "yyyy-MM-dd'T'HH:mm:ss'Z'").alias("window_start"),
+        F.date_format(F.col("window.end"), "yyyy-MM-dd'T'HH:mm:ss'Z'").alias("window_end"),
+        F.col("avg_temperature"), F.col("min_temperature"), F.col("max_temperature"),
+        F.col("avg_humidity"), F.col("avg_pressure"), F.col("max_wind_speed"),
+        F.col("avg_air_quality"), F.col("reading_count"),
+    )
+    write_to_cassandra(out, "sensor_aggregates")
+    print(f"[agg batch {epoch_id}] windows updated={out.count()}")
+
+
+def build_windowed_aggregates(parsed):
+    """
+    Spark Structured Streaming WINDOWED aggregation: tumbling 1-minute windows
+    per city. Demonstrates aggregation + windowing (avg/min/max/count) on the
+    live sensor stream, with a watermark to bound state.
+    """
+    return (
+        parsed
+        # keep only real readings (drop metadata envelopes / null sensors)
+        .filter((F.col("type").isNull() | (F.col("type") != "metadata"))
+                & F.col("sensor_id").isNotNull() & F.col("city").isNotNull())
+        # event-time column from the message timestamp + watermark for state cleanup
+        .withColumn("event_time", F.to_timestamp("timestamp"))
+        .withWatermark("event_time", "2 minutes")
+        .groupBy(F.window("event_time", "1 minute"), F.col("city"))
+        .agg(
+            F.avg("temperature").alias("avg_temperature"),
+            F.min("temperature").alias("min_temperature"),
+            F.max("temperature").alias("max_temperature"),
+            F.avg("humidity").alias("avg_humidity"),
+            F.avg("pressure").alias("avg_pressure"),
+            F.max("wind_speed").alias("max_wind_speed"),
+            F.avg("air_quality").alias("avg_air_quality"),
+            F.count(F.lit(1)).alias("reading_count"),
+        )
+    )
+
+
 def main():
     spark = (
         SparkSession.builder
         .appName("WeatherMonitoringStreaming")
         .config("spark.cassandra.connection.host", CASSANDRA_HOST)
-        .config("spark.sql.shuffle.partitions", "4")
+        # --- OPTIMIZATION knobs (env-tunable) ---
+        # Fewer shuffle partitions for small clusters avoids tiny-task overhead.
+        .config("spark.sql.shuffle.partitions", os.getenv("SPARK_SHUFFLE_PARTITIONS", "4"))
+        # Cassandra connector write tuning: parallel writes + larger batches
+        # grouped by partition key -> fewer round-trips, higher write throughput.
+        .config("spark.cassandra.output.concurrent.writes",
+                os.getenv("CASS_CONCURRENT_WRITES", "4"))
+        .config("spark.cassandra.output.batch.size.rows",
+                os.getenv("CASS_BATCH_SIZE_ROWS", "200"))
+        .config("spark.cassandra.output.batch.grouping.key", "partition")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")
@@ -329,14 +392,19 @@ def main():
     print(f" AI detector mode: {ai_model.get_detector().mode}")
     print("=" * 60)
 
-    raw = (
+    reader = (
         spark.readStream
         .format("kafka")
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
         .option("subscribe", TOPIC_WEATHER)
         .option("startingOffsets", "latest")
-        .load()
     )
+    # OPTIMIZATION (back-pressure): cap records per micro-batch so latency stays
+    # bounded under load. Applied only when MAX_OFFSETS_PER_TRIGGER is set.
+    max_offsets = os.getenv("MAX_OFFSETS_PER_TRIGGER")
+    if max_offsets:
+        reader = reader.option("maxOffsetsPerTrigger", max_offsets)
+    raw = reader.load()
 
     parsed = (
         raw.selectExpr("CAST(value AS STRING) AS json")
@@ -344,6 +412,7 @@ def main():
         .select("d.*")
     )
 
+    # Query 1: per-record processing (validate, latency, severity, alarms, AI)
     query = (
         parsed.writeStream
         .foreachBatch(process_batch)
@@ -353,8 +422,18 @@ def main():
         .start()
     )
 
-    print("Streaming started. Waiting for data...")
-    query.awaitTermination()
+    # Query 2: windowed aggregation (tumbling 1-min per city -> sensor_aggregates)
+    agg_query = (
+        build_windowed_aggregates(parsed).writeStream
+        .foreachBatch(write_aggregates)
+        .option("checkpointLocation", CHECKPOINT_DIR + "_agg")
+        .trigger(processingTime=TRIGGER_INTERVAL)
+        .outputMode("update")
+        .start()
+    )
+
+    print("Streaming started (processing + windowed aggregation). Waiting for data...")
+    spark.streams.awaitAnyTermination()
 
 
 if __name__ == "__main__":
