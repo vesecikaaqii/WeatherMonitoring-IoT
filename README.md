@@ -29,20 +29,28 @@ dashboard — with a built-in **stress-test** harness for performance analysis.
 ## Architecture
 
 ```
- ┌──────────────────┐     ┌──────────┐     ┌────────────────────────┐     ┌────────────┐
- │ Weather Sensor   │     │  Apache  │     │ Apache Spark           │     │  Apache    │
- │ Simulator /      │ ──▶ │  Kafka   │ ──▶ │ Structured Streaming   │ ──▶ │ Cassandra  │
- │ Gateway (FastAPI)│     │          │     │ • parse + validate     │     │ weather_ks │
- └──────────────────┘     │ topics:  │     │ • latency calc         │     └─────┬──────┘
-        ▲                 │ weather_ │     │ • severity + alarms    │           │
-        │ control         │  data    │     │ • AI anomaly detection │           │
-        │ (start/stop)    │ weather_ │     └────────────────────────┘           │
- ┌──────┴───────────┐     │  alerts  │                                          ▼
- │  Streamlit       │     │ perf_    │                              ┌────────────────────┐
- │  Dashboard       │ ◀───┴─ metrics ┘  ◀──────── reads ─────────── │ UI / AI / Alarms / │
- │ (7 pages)        │                                               │ Performance        │
- └──────────────────┘                                               └────────────────────┘
+ ┌──────────────────┐     ┌───────────────┐     ┌──────────────────────────┐     ┌─────────────────────┐
+ │ Weather Sensor   │     │  Apache Kafka │     │ Apache Spark             │     │  Apache Cassandra   │
+ │ Simulator /      │ ──▶ │  topics:      │ ──▶ │ Structured Streaming     │ ──▶ │  keyspace weather_ks│
+ │ Gateway (FastAPI)│     │  • weather_   │     │ Query 1 (per record):    │     │  • sensor_metadata  │
+ └──────────────────┘     │    data       │     │  • parse + validate      │     │  • sensor_readings  │
+        ▲                 │  • weather_   │     │  • filter + latency       │     │  • latest_readings  │
+        │ control         │    alerts ◀───┼─────┤  • severity + alarms      │     │  • alarms           │
+        │ (start/stop/    │  • performance│     │  • AI anomaly detection  │     │  • performance_     │
+        │  config/stress) │    _metrics   │     │ Query 2 (windowed):      │     │    metrics          │
+ ┌──────┴───────────┐     └───────────────┘     │  • 1-min tumbling window │     │  • sensor_aggregates│
+ │  Web Dashboard   │                           │    agg per city          │     └──────────┬──────────┘
+ │  (Streamlit, 7p) │ ◀──────────────────────────────────── reads ────────────────────────┤
+ ├──────────────────┤                           └──────────────────────────┘                │
+ │  Mobile Dashboard│ ◀───────────────────────────────────── reads ───────────────────────┘
+ │  (FastAPI PWA,8t)│        UI / AI / Alarms / Performance / Metadata / Aggregates
+ └──────────────────┘
 ```
+Spark runs **two streaming queries** on the same Kafka source: per-record
+processing (validate → latency → severity → alarms → AI) and a **windowed
+aggregation** (tumbling 1-min per city → `sensor_aggregates`). Detected alarms
+are published back to the `weather_alerts` topic before being stored. Both the
+web (Streamlit) and mobile (PWA) dashboards read from Cassandra.
 
 ## Technologies
 
