@@ -58,6 +58,7 @@ web (Streamlit) and mobile (PWA) dashboards read from Cassandra.
 |-------|-----------|
 | Sensor / gateway | Python, FastAPI, kafka-python |
 | Message queue | Apache Kafka (+ Zookeeper) |
+| Kafka monitoring | Kafka UI (Provectus) — web topic/partition/message browser |
 | Stream processing | Apache Spark Structured Streaming (PySpark) |
 | Storage | Apache Cassandra |
 | AI | scikit-learn IsolationForest (+ statistical fallback); Keras **LSTM** temperature forecast trained offline (moving-average fallback if the model/TensorFlow is absent) |
@@ -119,11 +120,7 @@ WeatherMonitoring-IoT/
 Copy-Item .env.example .env
 ```
 
-**2. Start the infrastructure (Zookeeper, Kafka, Cassandra)**
-```powershell
-docker compose up -d zookeeper kafka cassandra
-```
-Wait ~45 s for Cassandra to report healthy: `docker compose ps`.
+docker compose up -d zookeeper kafka cassandra kafka-ui
 
 **3. Initialize the Cassandra schema**
 ```powershell
@@ -173,9 +170,15 @@ docker exec cassandra cqlsh -e "SELECT sensor_id, city, temperature, severity, i
 ```
 
 The web dashboard is at **http://localhost:8501**, the simulator API docs at
-**http://localhost:8000/docs**, and the **mobile dashboard** at
-**http://localhost:8600** (on a phone use the host IP, e.g.
-`http://<server-ip>:8600`, then *Add to Home Screen* for an app-like PWA).
+**http://localhost:8000/docs**, the **Kafka UI** at **http://localhost:8090**
+(browse topics / partitions / live messages instead of using the terminal), and
+the **mobile dashboard** at **http://localhost:8600** (on a phone
+use the host IP, e.g. `http://<server-ip>:8600`, then *Add to Home Screen*
+for an app-like PWA).
+
+> With Kafka UI you can verify topics and partition counts (`weather_data`=6,
+> `weather_alerts`=3, `performance_metrics`=3) and watch messages flow live —
+> the `kafka-topics --list` terminal command is optional once the UI is up.
 
 ---
 
@@ -248,7 +251,64 @@ results on the **Performance** page.
 |-------|-----------|---------|
 | `weather_data` | 6 | Raw sensor readings (simulator → Spark) |
 | `weather_alerts` | 3 | Alarm events stream |
-| `performance_metrics` | 3 | Throughput / latency samples |
+| `performance_metrics` | 3 | Throughput / latency samples (published by Spark per batch **and** by the stress test, as JSON — same payload also stored in Cassandra) |
+
+### Kafka UI — what to show in the demo
+
+Open **http://localhost:8090** and pick the **weather-cluster**. Useful views
+for the presentation (all in the browser, no terminal):
+
+- **Topics** → confirm the three topics and their partition counts
+  (`weather_data`=6, `weather_alerts`=3, `performance_metrics`=3).
+- **Topics → weather_data → Messages** → watch raw readings arrive live while
+  the simulator runs; **weather_alerts → Messages** shows alarm events as Spark
+  publishes them.
+- **Brokers / Topics** → per-partition message counts prove the data is spread
+  across partitions (parallelism).
+- **Consumers** → Spark's Structured Streaming source appears as a group named
+  `spark-kafka-source-…`.
+
+> **Note on consumer lag:** Spark Structured Streaming tracks its own offsets in
+> its `checkpointLocation`, not in Kafka's `__consumer_offsets`, so the **lag**
+> figure Kafka UI shows for the `spark-kafka-source-*` group is **not** a
+> reliable measure of Spark's real progress. To confirm Spark is keeping up,
+> compare the live message rate on `weather_data` with the dashboard's
+> **Reporting sensors (Cassandra)** / **Msg/s** KPIs — if production flows but
+> Reporting stays 0, Spark isn't consuming (restart the Spark job).
+
+### Verify performance → Kafka (Windows PowerShell)
+
+After updating the code so metrics are published to Kafka, apply the change and
+watch `performance_metrics` fill up in Kafka UI. **Re-submit the Spark job** (not
+just `restart`) so it runs the new `spark_processor.py`:
+
+```powershell
+
+docker compose up -d --build simulator-api
+
+docker compose restart spark-master spark-worker
+docker exec -it spark-master bash -lc "mkdir -p /tmp/.ivy2/cache /tmp/.ivy2/jars && /opt/spark/bin/spark-submit --master spark://spark-master:7077 --conf spark.jars.ivy=/tmp/.ivy2 --conf spark.sql.shuffle.partitions=6 --conf spark.cassandra.output.concurrent.writes=4 --conf spark.cassandra.output.batch.size.rows=200 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 /app/stream-processing/spark_processor.py"
+
+$body = @{
+  mode = "normal"
+  num_sensors = 9
+  interval_seconds = 1
+  messages_per_second = 0
+  anomaly_rate = 0.30
+  cities = @("Prishtina","Prizren","Peja","Gjakova","Mitrovica","Gjilan","Ferizaj","Podujeva","Vushtrri")
+} | ConvertTo-Json
+
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/config" -ContentType "application/json" -Body $body
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/start"
+
+Start-Process "http://localhost:8090"
+```
+
+The Spark `spark-submit` in step 2 runs in the foreground (keep that window
+open). Within a few seconds you should see JSON arriving on `performance_metrics`
+in Kafka UI — one message per micro-batch (mode `stream`), plus one per stress
+test (mode `stress`). `anomaly_rate = 0.30` also produces plenty of WARNING /
+CRITICAL alarms on `weather_alerts`.
 
 ## AI component
 
