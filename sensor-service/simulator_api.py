@@ -70,18 +70,51 @@ def _stream_latency_since(start_iso):
         return 0.0, 0.0
 
 
+def _publish_perf_to_kafka(payload):
+    """
+    Best-effort: publish a performance-metric record to the Kafka topic
+    `performance_metrics` (JSON), reusing the simulator's Kafka producer. Never
+    raises (Kafka may be unavailable).
+    """
+    try:
+        producer = sim._connect()
+        producer.send(config.TOPIC_PERFORMANCE, key=payload["mode"], value=payload)
+        producer.flush()
+        print(f"[stress-test] perf published to Kafka topic "
+              f"{config.TOPIC_PERFORMANCE}")
+    except Exception as exc:  # pragma: no cover - Kafka optional
+        print(f"[stress-test] perf->kafka publish failed: {exc}")
+
+
 def _write_stress_metric(produced, elapsed, target_mps,
                          avg_latency_ms=0.0, max_latency_ms=0.0):
     """
-    Best-effort: persist one stress-test summary row to
-    performance_metrics (mode='stress') so the dashboard's stress section and
-    requirement #11 are satisfied. Never raises (Cassandra may be unavailable).
+    Persist one stress-test summary row to performance_metrics (mode='stress')
+    so the dashboard's stress section and requirement #11 are satisfied, AND
+    publish the same summary to the Kafka topic `performance_metrics`. Both are
+    best-effort and never raise (Cassandra / Kafka may be unavailable).
     """
+    achieved = round(produced / elapsed, 2) if elapsed > 0 else 0.0
+    metric_id = uuid.uuid4()
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    # Publish to Kafka first (independent of Cassandra availability).
+    _publish_perf_to_kafka({
+        "metric_id": str(metric_id),
+        "mode": "stress",
+        "timestamp": timestamp,
+        "messages_per_second": achieved,
+        "avg_latency_ms": float(avg_latency_ms),
+        "max_latency_ms": float(max_latency_ms),
+        "cassandra_write_time_ms": 0.0,
+        "total_processed": int(produced),
+    })
+
+    # Persist the same summary to Cassandra (schema unchanged).
     try:
         from cassandra.cluster import Cluster
         cluster = Cluster([CASSANDRA_HOST])
         session = cluster.connect(CASSANDRA_KEYSPACE)
-        achieved = round(produced / elapsed, 2) if elapsed > 0 else 0.0
         session.execute(
             """
             INSERT INTO performance_metrics (
@@ -92,8 +125,8 @@ def _write_stress_metric(produced, elapsed, target_mps,
             """,
             (
                 "stress",
-                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                uuid.uuid4(),
+                timestamp,
+                metric_id,
                 int(produced),
                 achieved,
                 float(avg_latency_ms),
