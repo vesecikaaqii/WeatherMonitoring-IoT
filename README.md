@@ -109,50 +109,72 @@ WeatherMonitoring-IoT/
 
 ---
 
-## Quick start (Docker — recommended)
+## Quick start (Windows PowerShell + Docker)
 
-```bash
+> Run every command in **PowerShell** from the project root, with **Docker
+> Desktop** running. The steps are sequential — finish each before the next.
 
-cp .env.example .env
-
-docker compose up -d zookeeper kafka cassandra
-
-docker exec -it cassandra cqlsh -f /scripts/cassandra_setup.cql
-
-docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic weather_data --partitions 6 --replication-factor 1
-
-docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic weather_alerts --partitions 3 --replication-factor 1
-
-docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic performance_metrics --partitions 3 --replication-factor 1
-
-docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --list
-
-docker compose up -d --build simulator-api dashboard mobile-dashboard spark-master spark-worker
-
-docker exec -it spark-master bash -lc "mkdir -p /tmp/.ivy2/cache /tmp/.ivy2/jars && /opt/spark/bin/spark-submit --master spark://spark-master:7077 --conf spark.jars.ivy=/tmp/.ivy2 --conf spark.sql.shuffle.partitions=6 --conf spark.cassandra.output.concurrent.writes=4 --conf spark.cassandra.output.batch.size.rows=200 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 /app/stream-processing/spark_processor.py"
-
-docker exec -it cassandra cqlsh -e "SELECT sensor_id, city, temperature, humidity, pressure, severity, is_anomaly FROM weather_ks.latest_readings;"
-
-docker exec -it cassandra cqlsh -e "SELECT COUNT(*) FROM weather_ks.alarms;"
-
-Start-Process "http://localhost:8501"
-
-Start-Process "http://localhost:8600"
-
-CASSANDRA_HOST=127.0.0.1 python infrastructure/seed_metadata.py
-
-CASSANDRA_HOST=127.0.0.1 python infrastructure/seed_historical_readings.py
-
-CASSANDRA_HOST=127.0.0.1 python stream-processing/train_lstm.py
-
-docker exec -it spark-master spark-submit \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 \
-  /app/stream-processing/spark_processor.py
+**1. Configure the environment**
+```powershell
+Copy-Item .env.example .env
 ```
 
-Open the web dashboard at **http://localhost:8501**, the simulator API docs at
+**2. Start the infrastructure (Zookeeper, Kafka, Cassandra)**
+```powershell
+docker compose up -d zookeeper kafka cassandra
+```
+Wait ~45 s for Cassandra to report healthy: `docker compose ps`.
+
+**3. Initialize the Cassandra schema**
+```powershell
+docker exec -it cassandra cqlsh -f /scripts/cassandra_setup.cql
+```
+
+**4. Create the Kafka topics** (partitions: `weather_data`=6, `weather_alerts`=3, `performance_metrics`=3)
+```powershell
+docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic weather_data --partitions 6 --replication-factor 1
+docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic weather_alerts --partitions 3 --replication-factor 1
+docker exec kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic performance_metrics --partitions 3 --replication-factor 1
+docker exec kafka kafka-topics --bootstrap-server localhost:9092 --list
+```
+
+**5. Build and start the application services**
+```powershell
+docker compose up -d --build simulator-api dashboard mobile-dashboard spark-master spark-worker
+```
+
+**6. Submit the Spark streaming job** (leave it running; open a new PowerShell tab for the next steps)
+```powershell
+docker exec -it spark-master bash -lc "mkdir -p /tmp/.ivy2/cache /tmp/.ivy2/jars && /opt/spark/bin/spark-submit --master spark://spark-master:7077 --conf spark.jars.ivy=/tmp/.ivy2 --conf spark.sql.shuffle.partitions=6 --conf spark.cassandra.output.concurrent.writes=4 --conf spark.cassandra.output.batch.size.rows=200 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 /app/stream-processing/spark_processor.py"
+```
+
+**7. Seed sensor metadata** (and, optionally, 7 days of demo history for the charts)
+```powershell
+$env:CASSANDRA_HOST="127.0.0.1"; python infrastructure/seed_metadata.py
+$env:CASSANDRA_HOST="127.0.0.1"; python infrastructure/seed_historical_readings.py   # optional demo data
+```
+
+**8. Train the LSTM forecast (Docker-based)** — optional; without it the forecast uses the moving-average fallback
+```powershell
+docker exec dashboard python /app/stream-processing/train_lstm.py
+```
+(The model is written inside the running `dashboard` container, which then serves it. To enable the LSTM on the phone app too, run the same against `mobile-dashboard`.)
+
+**9. Start the simulator and open the dashboards**
+```powershell
+Invoke-RestMethod -Method Post http://localhost:8000/start
+Start-Process "http://localhost:8501"   # web dashboard
+Start-Process "http://localhost:8600"   # mobile dashboard
+```
+
+**Optional — quick data check**
+```powershell
+docker exec cassandra cqlsh -e "SELECT sensor_id, city, temperature, severity, is_anomaly FROM weather_ks.latest_readings;"
+```
+
+The web dashboard is at **http://localhost:8501**, the simulator API docs at
 **http://localhost:8000/docs**, and the **mobile dashboard** at
-**http://localhost:8600** (open it on your phone using the server's IP, e.g.
+**http://localhost:8600** (on a phone use the host IP, e.g.
 `http://<server-ip>:8600`, then *Add to Home Screen* for an app-like PWA).
 
 ---
@@ -170,7 +192,11 @@ export CASSANDRA_HOST=127.0.0.1
 export SIMULATOR_API_URL=http://localhost:8000
 
 cqlsh -f infrastructure/cassandra_setup.cql
-bash infrastructure/kafka_topics.sh
+
+kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic weather_data --partitions 6 --replication-factor 1
+kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic weather_alerts --partitions 3 --replication-factor 1
+kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic performance_metrics --partitions 3 --replication-factor 1
+
 python infrastructure/seed_metadata.py
 
 python sensor-service/simulator_api.py
@@ -220,9 +246,9 @@ results on the **Performance** page.
 
 | Topic | Partitions | Purpose |
 |-------|-----------|---------|
-| `weather_data` | 3 | Raw sensor readings (simulator → Spark) |
+| `weather_data` | 6 | Raw sensor readings (simulator → Spark) |
 | `weather_alerts` | 3 | Alarm events stream |
-| `performance_metrics` | 1 | Throughput / latency samples |
+| `performance_metrics` | 3 | Throughput / latency samples |
 
 ## AI component
 
@@ -247,14 +273,14 @@ method actually used (`lstm` or `moving_average`), so it never overclaims. Both
 the web dashboard and the mobile **AI** tab (served by `/api/forecast`) load the
 *same* trained model, so forecasts are identical across clients.
 
-```bash
+```powershell
 
-CASSANDRA_HOST=127.0.0.1 python stream-processing/train_lstm.py
+docker exec dashboard python /app/stream-processing/train_lstm.py
 ```
 
 ## Alarm system
 
-Severity levels: **INFO / WARNING / CRITICAL**. When a parameter crosses a
+Severity levels: **NORMAL / WARNING / CRITICAL**. When a parameter crosses a
 threshold, Spark writes an alarm row with `parameter`, `value`, `threshold`,
 `severity`, `message`, and `status`. Examples:
 
@@ -316,31 +342,29 @@ write time into `performance_metrics` (mode `stream`); a stress test writes a
 summary row (mode `stress`). The dashboard **Performance** page charts these
 over time ("Spark Streaming Metrics" vs "Stress Test Metrics").
 
-**Example results** (single laptop, Docker, 3 Kafka partitions — these are
-placeholders). Generate the **real** table from your own run with:
+**Measured results** (single laptop, Docker, 6 Kafka partitions, optimized
+config). Refresh the table any time from your own run with:
 
-```bash
-
-CASSANDRA_HOST=127.0.0.1 python infrastructure/perf_report.py
+```powershell
+$env:CASSANDRA_HOST="127.0.0.1"; python infrastructure/perf_report.py
 ```
 
 It reads `performance_metrics` from Cassandra and prints a ready-to-paste
-markdown table, so the numbers are measured, not invented. Replace the rows
-below with its output:
+markdown table, so the numbers are measured, not invented.
 
-| Mode | Target msg/s | Achieved | Avg latency | Max latency | Cassandra write |
-|------|-------------|----------|-------------|-------------|-----------------|
-| normal | ~2 | ~2 | 35 ms | 90 ms | 40 ms |
-| stress | 500 | ~480 | 410 ms | 1100 ms | 160 ms |
-| stress | 1000 | ~850 | 900 ms | 2400 ms | 320 ms |
+| Mode | Target msg/s | Achieved | Avg latency | Max latency |
+|------|-------------|----------|-------------|-------------|
+| stress | 500 | ~492 | ~3410 ms | ~6067 ms |
 
-Latency rises with throughput once Spark batches and Cassandra writes become the
-bottleneck; achieved rate approaches target until a single-node broker saturates
-(~800–1000 msg/s on a laptop).
+At 500 msg/s the throughput target is sustained, but end-to-end latency rises to
+~3.4 s (peak ~6 s) — the driver-side micro-batch path (`collect()` + per-row
+Python in `process_batch`) is the bottleneck under load. Run `perf_report.py`
+after a `normal` run and a 1000 msg/s stress test to add those rows.
 
 **Optimization recommendations:**
-1. **Kafka partitions** — increase `weather_data` beyond 3 so more Spark
-   consumer tasks run in parallel (partitioned by `sensor_id` for per-sensor ordering).
+1. **Kafka partitions** — the project provisions **6** `weather_data` partitions
+   so up to 6 Spark consumer tasks run in parallel (partitioned by `sensor_id`
+   for per-sensor ordering); raise it further for more parallelism.
 2. **Spark trigger interval** — tune `SPARK_TRIGGER_INTERVAL`: shorter (1–2s)
    lowers latency, longer (5–10s) increases batch size and throughput.
 3. **Cassandra schema** — bounded partitions `((sensor_id, date), timestamp)`
@@ -366,20 +390,22 @@ shows what changed:
 | Cassandra batch size (rows) | default | 200, grouped by partition | `CASS_BATCH_SIZE_ROWS` |
 | Back-pressure (`maxOffsetsPerTrigger`) | unbounded | optional cap | `MAX_OFFSETS_PER_TRIGGER` |
 
-**Indicative impact** at 1000 msg/s stress (single laptop — example numbers,
-replace with your measured values):
+**Measured impact.** The optimized configuration above was measured at a stress
+test of 500 msg/s: **~492 msg/s achieved, ~3410 ms avg latency, ~6067 ms peak**.
+A before/after delta is intentionally **not** fabricated here — to quantify it,
+run the stress test twice and compare the two `perf_report.py` outputs: once with
+the tuning **off** (baseline) and once **on**.
 
-| Metric | Before optimization | After optimization |
-|--------|--------------------|--------------------|
-| Achieved throughput | ~850 msg/s | ~1000 msg/s |
-| Avg latency | ~900 ms | ~600 ms |
-| Max latency | ~2400 ms | ~1500 ms |
-| Cassandra write time | ~320 ms | ~180 ms |
+To capture the "before" baseline, disable the optimizations in `.env`, recreate
+the services, and re-run the stress test:
+
+```powershell
+# in .env: PRODUCER_COMPRESSION=none and CASS_CONCURRENT_WRITES=1
+docker compose up -d --force-recreate simulator-api spark-master spark-worker
+```
 
 > The **stored data is identical** before/after — compression and write tuning
-> change *speed*, not the readings/alarms/values. To reproduce the "before"
-> state for a demo comparison, set `PRODUCER_COMPRESSION=none`,
-> `CASS_CONCURRENT_WRITES=1` in `.env` and re-run the stress test.
+> change *speed*, not the readings/alarms/values.
 
 ## Mobile dashboard (PWA)
 
@@ -407,32 +433,15 @@ only needs one URL.
 The mobile dashboard reads from Cassandra and controls the simulator, so the
 infrastructure + data must be up first.
 
-**Option A — Docker (recommended)**
-```bash
+**Option A — Docker (recommended).** Follow the main **Quick start (Windows
+PowerShell + Docker)** above — it already builds and starts `mobile-dashboard`
+alongside the web dashboard, creates the Kafka topics manually, seeds the data,
+and (optionally) trains the LSTM. Once the simulator is started (step 9), the
+mobile app is live at **http://localhost:8600**.
 
-cp .env.example .env
-
-docker compose up -d zookeeper kafka cassandra
-
-docker exec -it cassandra cqlsh -f /scripts/cassandra_setup.cql
-
-docker exec -it kafka bash /scripts/kafka_topics.sh
-
-docker compose up -d --build simulator-api mobile-dashboard dashboard spark-master spark-worker
-
-CASSANDRA_HOST=127.0.0.1 python infrastructure/seed_metadata.py
-CASSANDRA_HOST=127.0.0.1 python infrastructure/seed_historical_readings.py
-
-CASSANDRA_HOST=127.0.0.1 python stream-processing/train_lstm.py
-
-curl -X POST http://localhost:8000/start
-```
-
-**Open it on a phone**
-```bash
-
-ipconfig           
-
+**Open it on a phone** — find your machine's LAN IP:
+```powershell
+ipconfig
 ```
 - Computer: **http://localhost:8600**
 - Phone (same WiFi): **http://<your-ip>:8600** (e.g. `http://192.168.1.20:8600`)
