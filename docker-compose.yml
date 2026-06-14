@@ -52,6 +52,22 @@ services:
     volumes:
       - ./infrastructure:/scripts
 
+  # Web UI for Kafka (browse topics, partitions, messages, consumer groups) —
+  # replaces the kafka-topics terminal commands. Open http://localhost:8090.
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: weather-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+      # Allow creating topics / editing config from the UI.
+      DYNAMIC_CONFIG_ENABLED: "true"
+
   cassandra:
     image: cassandra:4.1
     container_name: cassandra
