@@ -39,6 +39,7 @@ com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 \
 (Kafka / Cassandra hosts come from environment variables -> Docker friendly.)
 """
 import os
+import json
 import time
 import uuid
 
@@ -56,6 +57,7 @@ import ai_model
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TOPIC_WEATHER = os.getenv("KAFKA_TOPIC", "weather_data")
 TOPIC_ALERTS = os.getenv("KAFKA_TOPIC_ALERTS", "weather_alerts")
+TOPIC_PERFORMANCE = os.getenv("KAFKA_TOPIC_PERFORMANCE", "performance_metrics")
 CASSANDRA_HOST = os.getenv("CASSANDRA_HOST", "127.0.0.1")
 CASSANDRA_KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "weather_ks")
 CHECKPOINT_DIR = os.getenv("SPARK_CHECKPOINT_DIR", "stream-processing/checkpoints")
@@ -184,6 +186,33 @@ def publish_alarms_to_kafka(alarms_df):
         .save())
 
 
+def publish_perf_to_kafka(spark, perf_row):
+    """
+    Publish one performance-metric record to the Kafka topic
+    `performance_metrics` as a JSON value (keyed by mode). This mirrors the row
+    written to Cassandra so the metric is observable on the live stream too
+    (e.g. in Kafka UI). Best-effort: a Kafka failure here must not break the
+    batch, so callers wrap it in try/except.
+    """
+    payload = {
+        "metric_id": perf_row["metric_id"],
+        "mode": perf_row["mode"],
+        "timestamp": perf_row["timestamp"],
+        "messages_per_second": perf_row["messages_per_second"],
+        "avg_latency_ms": perf_row["avg_latency_ms"],
+        "max_latency_ms": perf_row["max_latency_ms"],
+        "cassandra_write_time_ms": perf_row["cassandra_write_time_ms"],
+        "total_processed": perf_row["messages_processed"],
+    }
+    kdf = spark.createDataFrame([(perf_row["mode"], json.dumps(payload))],
+                                ["key", "value"])
+    (kdf.write
+        .format("kafka")
+        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+        .option("topic", TOPIC_PERFORMANCE)
+        .save())
+
+
 def process_batch(batch_df, epoch_id):
     """
     foreachBatch handler. Runs once per micro-batch. We collect to the driver
@@ -291,13 +320,20 @@ def process_batch(batch_df, epoch_id):
         "notes": f"epoch={epoch_id}",
     }]
     write_to_cassandra(spark.createDataFrame(perf), "performance_metrics")
+    # Also publish the SAME metric to Kafka (topic performance_metrics) so it is
+    # visible on the live stream / Kafka UI. Best-effort: never break the batch.
+    try:
+        publish_perf_to_kafka(spark, perf[0])
+    except Exception as exc:  # pragma: no cover
+        print(f"[batch {epoch_id}] perf->kafka publish failed: {exc}")
 
     # ---- Logging ----
     print(
         f"[batch {epoch_id}] processed={n} alarms={len(all_alarms)} "
         f"(published to {TOPIC_ALERTS}) "
         f"avg_latency={avg_lat}ms max_latency={max_lat}ms "
-        f"cass_write={cass_write_ms}ms rate={mps}msg/s"
+        f"cass_write={cass_write_ms}ms rate={mps}msg/s "
+        f"(perf->{TOPIC_PERFORMANCE})"
     )
 
 
