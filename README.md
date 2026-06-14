@@ -60,7 +60,7 @@ web (Streamlit) and mobile (PWA) dashboards read from Cassandra.
 | Message queue | Apache Kafka (+ Zookeeper) |
 | Stream processing | Apache Spark Structured Streaming (PySpark) |
 | Storage | Apache Cassandra |
-| AI | scikit-learn IsolationForest (+ statistical fallback), Keras LSTM (bonus) |
+| AI | scikit-learn IsolationForest (+ statistical fallback); moving-average temperature forecast with an optional, LSTM-ready Keras scaffold (inactive unless TensorFlow is installed) |
 | Dashboard (web) | Streamlit, pandas |
 | Dashboard (mobile) | FastAPI + responsive HTML/JS PWA |
 | Orchestration | Docker Compose |
@@ -120,10 +120,25 @@ docker compose up -d zookeeper kafka cassandra
 docker exec -it cassandra cqlsh -f /scripts/cassandra_setup.cql
 
 # 4. Create Kafka topics
-docker exec -it kafka bash /scripts/kafka_topics.sh
+docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic weather_data --partitions 6 --replication-factor 1
 
-# 5. Start the app containers (web dashboard + mobile PWA + Spark)
-docker compose up -d simulator-api dashboard mobile-dashboard spark-master spark-worker
+docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic weather_alerts --partitions 3 --replication-factor 1
+
+docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic performance_metrics --partitions 3 --replication-factor 1
+
+docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --list
+
+docker compose up -d --build simulator-api dashboard mobile-dashboard spark-master spark-worker
+
+docker exec -it spark-master bash -lc "mkdir -p /tmp/.ivy2/cache /tmp/.ivy2/jars && /opt/spark/bin/spark-submit --master spark://spark-master:7077 --conf spark.jars.ivy=/tmp/.ivy2 --conf spark.sql.shuffle.partitions=6 --conf spark.cassandra.output.concurrent.writes=4 --conf spark.cassandra.output.batch.size.rows=200 --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 /app/stream-processing/spark_processor.py"
+
+docker exec -it cassandra cqlsh -e "SELECT sensor_id, city, temperature, humidity, pressure, severity, is_anomaly FROM weather_ks.latest_readings;"
+
+docker exec -it cassandra cqlsh -e "SELECT COUNT(*) FROM weather_ks.alarms;"
+
+Start-Process "http://localhost:8501"
+
+Start-Process "http://localhost:8600"
 
 # 6. Seed sensor metadata (from host, needs cassandra-driver)
 CASSANDRA_HOST=127.0.0.1 python infrastructure/seed_metadata.py
@@ -227,8 +242,12 @@ pure-Python statistical/threshold check, so the pipeline never crashes.
 report impossible spikes. Anomaly detection separates genuine extreme-weather
 events from sensor faults, complementing the static alarm thresholds. Each
 reading is stored with an `is_anomaly` flag and shown on the **AI / Prediction**
-dashboard page. A **bonus LSTM** (`lstm_forecast.py`) predicts the next
-temperature value (moving-average fallback if TensorFlow is absent).
+dashboard page. The next temperature value is predicted by a **moving-average
+forecast** (`lstm_forecast.py`). The same file contains an **LSTM-ready Keras
+scaffold** that activates only if TensorFlow is installed; TensorFlow is not a
+default dependency, so the forecast shown in the dashboard is the moving
+average. The dashboard's **Model** field always reports the method actually
+used.
 
 ## Alarm system
 

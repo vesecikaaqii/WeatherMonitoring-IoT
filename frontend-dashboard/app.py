@@ -384,11 +384,14 @@ def page_ai():
         st.info("No readings with anomaly flags yet.")
 
     st.markdown("---")
-    st.subheader("🌡️ Temperature forecast (bonus LSTM / moving average)")
+    st.subheader("🌡️ Temperature forecast (moving average — LSTM-ready)")
     st.caption(
         "Read-only prediction generated automatically from the latest sensor "
         "readings stored in Cassandra — this value is **not** entered manually "
-        "and is **not** random."
+        "and is **not** random. The active method is a **moving average** of "
+        "the most recent readings; a Keras LSTM path exists in "
+        "`lstm_forecast.py` but is inactive unless TensorFlow is installed "
+        "(see the **Model** field below for the method actually used)."
     )
     sensor_map = {
         "Prishtina": "PR-001", "Prizren": "PZ-001", "Peja": "PE-001",
