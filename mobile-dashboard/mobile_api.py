@@ -56,6 +56,10 @@ PORT = int(os.getenv("MOBILE_API_PORT", "8600"))
 # reporting when its most recent reading arrived within this many minutes.
 ACTIVE_WINDOW_MIN = int(os.getenv("ACTIVE_WINDOW_MIN", "10"))
 
+# The Overview "Recent alarms" KPI counts alarms raised within this many minutes
+# (bounded, meaningful) instead of the unbounded all-time total.
+ALARM_WINDOW_MIN = int(os.getenv("ALARM_WINDOW_MIN", "15"))
+
 ALL_CITIES = ["Prishtina", "Prizren", "Peja", "Gjakova", "Mitrovica",
               "Gjilan", "Ferizaj", "Podujeva", "Vushtrri"]
 
@@ -134,6 +138,26 @@ def reporting_sensor_ids():
     return out
 
 
+def count_recent_alarms():
+    """Count alarms raised within the last ALARM_WINDOW_MIN across all cities.
+
+    Server-side COUNT with a clustering-range filter on the ISO `timestamp`
+    (which sorts chronologically) -> reads only the recent slice per city, no
+    unbounded full-table scan.
+    """
+    cutoff_iso = (datetime.now(timezone.utc)
+                  - timedelta(minutes=ALARM_WINDOW_MIN)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    total = 0
+    for city in ALL_CITIES:
+        rs = rows(
+            f"SELECT COUNT(*) AS c FROM alarms "
+            f"WHERE city='{city}' AND timestamp >= '{cutoff_iso}'"
+        )
+        if rs:
+            total += int(rs[0].get("c", 0) or 0)
+    return total
+
+
 def configured_sensor_ids():
     """Sensor_ids the simulator is configured to produce now (real-time).
 
@@ -204,12 +228,9 @@ def overview():
     meta = rows("SELECT sensor_id, status FROM sensor_metadata")
     latest = rows("SELECT sensor_id, latency_ms FROM latest_readings")
 
-    # Count active alarms across all city partitions
-    active_alarms = 0
-    for city in ALL_CITIES:
-        for a in rows(f"SELECT status FROM alarms WHERE city='{city}' LIMIT 100"):
-            if a.get("status") == "active":
-                active_alarms += 1
+    # Recent alarms (bounded window) — meaningful and fast, unlike the unbounded
+    # all-time total (alarms are never resolved, so "active" only grows).
+    recent_alarms = count_recent_alarms()
 
     latencies = [r["latency_ms"] for r in latest if r.get("latency_ms") is not None]
     avg_latency = round(sum(latencies) / len(latencies), 1) if latencies else 0
@@ -233,7 +254,8 @@ def overview():
         "active_sensors_simulator": active_sensors_simulator,
         "reporting_sensors_cassandra": reporting_sensors_cassandra,
         "latest_readings": len(latest),
-        "active_alarms": active_alarms,
+        "recent_alarms": recent_alarms,
+        "alarm_window_min": ALARM_WINDOW_MIN,
         "avg_latency_ms": avg_latency,
         "messages_per_second": mps,
     }
@@ -325,14 +347,22 @@ def performance():
     for mode in ["stream", "stress", "normal"]:
         rs = rows(
             "SELECT timestamp, messages_processed, messages_per_second, "
-            f"avg_latency_ms FROM performance_metrics WHERE mode='{mode}' LIMIT 200"
+            f"avg_latency_ms, max_latency_ms FROM performance_metrics "
+            f"WHERE mode='{mode}' LIMIT 200"
         )
         rs.sort(key=lambda r: r.get("timestamp") or "")
+        avg_lats = [r.get("avg_latency_ms") for r in rs if r.get("avg_latency_ms") is not None]
+        max_lats = [r.get("max_latency_ms") for r in rs if r.get("max_latency_ms") is not None]
+        mps_vals = [r.get("messages_per_second") for r in rs if r.get("messages_per_second") is not None]
         result[mode] = {
             "mps": [r.get("messages_per_second") for r in rs],
             "latency": [r.get("avg_latency_ms") for r in rs],
             "total_processed": sum(int(r.get("messages_processed") or 0) for r in rs),
             "count": len(rs),
+            # summary values so the real latency under load is visible at a glance
+            "avg_latency": round(sum(avg_lats) / len(avg_lats), 1) if avg_lats else 0,
+            "peak_latency": round(max(max_lats), 1) if max_lats else 0,
+            "peak_mps": round(max(mps_vals), 1) if mps_vals else 0,
         }
     return JSONResponse(result)
 

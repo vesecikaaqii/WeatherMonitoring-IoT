@@ -138,7 +138,7 @@
         ${kpi(d.total_sensors, "Total sensors")}
         ${kpi(d.active_sensors_simulator, "Active (simulator)")}
         ${kpi(d.reporting_sensors_cassandra, "Reporting (Cassandra)")}
-        ${kpi(d.active_alarms, "Active alarms")}
+        ${kpi(d.recent_alarms, `Recent alarms (${d.alarm_window_min || 15}m)`)}
         ${kpi(d.latest_readings, "Latest readings")}
         ${kpi(d.avg_latency_ms, "Avg latency (ms)")}
         ${kpi(d.messages_per_second, "Msg/s (live)")}
@@ -390,6 +390,7 @@
         html += `<div class="card" style="margin-bottom:10px">
           <div class="l">${labels[mode]}</div>
           <div class="meta">total processed: ${m.total_processed} • samples: ${m.count}</div>
+          <div class="meta">peak: ${fmt(m.peak_mps)} msg/s • avg latency: ${fmt(m.avg_latency)} ms • peak latency: ${fmt(m.peak_latency)} ms</div>
           <div class="l" style="margin-top:8px">Messages / second</div>${sparkline(m.mps, "#34d399")}
           <div class="l" style="margin-top:8px">Avg latency (ms)</div>${sparkline(m.latency, "#f472b6")}
         </div>`;

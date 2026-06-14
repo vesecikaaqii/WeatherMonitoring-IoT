@@ -265,6 +265,12 @@ threshold, Spark writes an alarm row with `parameter`, `value`, `threshold`,
 Thresholds (per spec): temperature ±35/±40, humidity 85/95, pressure 1000/980,
 wind 10/15 m/s, rainfall 10/30 mm, air quality 100/150, battery 20/10.
 
+Alarm rows are kept for history (`status='active'`; they are not auto-resolved),
+so the Overview KPI shows **Recent alarms** — the count raised in the last
+`ALARM_WINDOW_MIN` minutes (default 15) — rather than the unbounded all-time
+total. It is computed with a server-side `COUNT` over the per-city clustering
+range on `timestamp`, so it stays fast as the table grows.
+
 ## Sensor metadata
 
 Each weather station's static description (manufacturer, model, serial number,
@@ -310,8 +316,17 @@ write time into `performance_metrics` (mode `stream`); a stress test writes a
 summary row (mode `stress`). The dashboard **Performance** page charts these
 over time ("Spark Streaming Metrics" vs "Stress Test Metrics").
 
-**Example results** (single laptop, Docker, 3 Kafka partitions — replace with
-your measured numbers):
+**Example results** (single laptop, Docker, 3 Kafka partitions — these are
+placeholders). Generate the **real** table from your own run with:
+
+```bash
+
+CASSANDRA_HOST=127.0.0.1 python infrastructure/perf_report.py
+```
+
+It reads `performance_metrics` from Cassandra and prints a ready-to-paste
+markdown table, so the numbers are measured, not invented. Replace the rows
+below with its output:
 
 | Mode | Target msg/s | Achieved | Avg latency | Max latency | Cassandra write |
 |------|-------------|----------|-------------|-------------|-----------------|

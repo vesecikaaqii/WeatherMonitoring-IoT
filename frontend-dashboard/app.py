@@ -53,6 +53,10 @@ SENSOR_MAP = {
 # when its most recent reading arrived within this many minutes.
 ACTIVE_WINDOW_MIN = int(os.getenv("ACTIVE_WINDOW_MIN", "10"))
 
+# The Overview "Recent alarms" KPI counts alarms raised within this many minutes
+# (bounded, meaningful) instead of the unbounded all-time total.
+ALARM_WINDOW_MIN = int(os.getenv("ALARM_WINDOW_MIN", "15"))
+
 st.set_page_config(page_title="Weather Monitoring IoT - Kosovo",
                    page_icon="🌤️", layout="wide")
 
@@ -112,6 +116,27 @@ def reporting_sensor_ids():
     ts = pd.to_datetime(lr["timestamp"], utc=True, errors="coerce")
     cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=ACTIVE_WINDOW_MIN)
     return set(lr.loc[ts >= cutoff, "sensor_id"].dropna().tolist())
+
+
+def count_recent_alarms():
+    """Count alarms raised within the last ALARM_WINDOW_MIN, across all cities.
+
+    `alarms` is partitioned by city and clustered by timestamp DESC, and the ISO
+    timestamp string sorts chronologically, so a server-side COUNT with a
+    clustering-range filter reads only the recent slice per city — no unbounded
+    full-table scan, and no LIMIT cap that would undercount under load.
+    """
+    cutoff_iso = (pd.Timestamp.now(tz="UTC")
+                  - pd.Timedelta(minutes=ALARM_WINDOW_MIN)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    total = 0
+    for city in ALL_CITIES:
+        df = query_df(
+            f"SELECT COUNT(*) AS c FROM alarms "
+            f"WHERE city='{city}' AND timestamp >= '{cutoff_iso}'"
+        )
+        if not df.empty and "c" in df:
+            total += int(df.iloc[0]["c"])
+    return total
 
 
 @st.cache_resource
@@ -182,11 +207,9 @@ def page_overview():
     configured_sensors = len(configured_sensor_ids())
     reporting_sensors = len(reporting_sensor_ids())
 
-    # Count active alarms across all cities
-    alarms = query_df("SELECT severity, status FROM alarms")
-    active_alarms = 0
-    if not alarms.empty:
-        active_alarms = int((alarms["status"] == "active").sum())
+    # Recent alarms (bounded window) — meaningful and fast, unlike the unbounded
+    # all-time "active" total (alarms are never resolved, so that only grows).
+    recent_alarms = count_recent_alarms()
 
     avg_latency = round(latest["latency_ms"].mean(), 1) if not latest.empty and "latency_ms" in latest else 0
     mps = metrics.get("messages_per_second", 0) if isinstance(metrics, dict) else 0
@@ -201,7 +224,9 @@ def page_overview():
               help=f"Wrote to latest_readings within the last "
                    f"{ACTIVE_WINDOW_MIN} min (Spark → Cassandra output)")
     c4.metric("Latest readings", len(latest))
-    c5.metric("Active alarms", active_alarms)
+    c5.metric(f"Recent alarms ({ALARM_WINDOW_MIN}m)", recent_alarms,
+              help=f"Alarms raised in the last {ALARM_WINDOW_MIN} min (not the "
+                   "unbounded all-time total)")
     c6.metric("Avg latency (ms)", avg_latency)
     c7.metric("Msg/s (live)", mps)
 
