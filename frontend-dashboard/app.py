@@ -485,7 +485,7 @@ def page_ai():
         st.info("No readings with anomaly flags yet.")
 
     st.markdown("---")
-    st.subheader("🌡️ Temperature forecast (LSTM)")
+    st.subheader("Temperature forecast (LSTM)")
     forecaster = get_forecaster()
     if forecaster.mode == "lstm":
         st.caption(
@@ -538,7 +538,7 @@ def page_ai():
                         f"- **Model:** {f.mode}"
                     )
                 st.info(
-                    "ℹ️ Because the system receives real-time IoT data, the "
+                    "Because the system receives real-time IoT data, the "
                     "prediction is recalculated when new readings are refreshed — "
                     "it updates when you **change the city**, click **Refresh "
                     "data** (sidebar), or the dashboard reloads."
