@@ -38,29 +38,21 @@ com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 \
 
 (Kafka / Cassandra hosts come from environment variables -> Docker friendly.)
 """
-
 import os
 import time
 import uuid
 
-# PySpark is imported lazily so the pure helper functions (classify_parameter,
-# build_alarms, THRESHOLDS) can be imported and unit-tested on machines without
-# a Spark install. The streaming job (main) requires pyspark at runtime.
 try:
     from pyspark.sql import SparkSession, functions as F
     from pyspark.sql.types import (
         StructType, StructField, StringType, DoubleType, LongType
     )
     _SPARK_AVAILABLE = True
-except Exception:  # pragma: no cover
+except Exception:
     _SPARK_AVAILABLE = False
 
-# AI anomaly detector (degrades to statistical fallback if sklearn missing)
 import ai_model
 
-# --------------------------------------------------------------------------
-# Environment-driven configuration (works locally AND in Docker)
-# --------------------------------------------------------------------------
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 TOPIC_WEATHER = os.getenv("KAFKA_TOPIC", "weather_data")
 TOPIC_ALERTS = os.getenv("KAFKA_TOPIC_ALERTS", "weather_alerts")
@@ -69,10 +61,6 @@ CASSANDRA_KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "weather_ks")
 CHECKPOINT_DIR = os.getenv("SPARK_CHECKPOINT_DIR", "stream-processing/checkpoints")
 TRIGGER_INTERVAL = os.getenv("SPARK_TRIGGER_INTERVAL", "5 seconds")
 
-# --------------------------------------------------------------------------
-# Weather thresholds (mirrors the project spec exactly)
-# Each entry: parameter -> dict with warning/critical bounds.
-# --------------------------------------------------------------------------
 THRESHOLDS = {
     "temperature": {"warn_low": -10, "warn_high": 35, "crit_low": -20, "crit_high": 40},
     "humidity":    {"warn_high": 85, "crit_high": 95},
@@ -93,9 +81,6 @@ def classify_parameter(param, value):
         return "NORMAL", None, None
     t = THRESHOLDS.get(param, {})
 
-    # Critical checks first (highest severity wins).
-    # The fragment is just the relation (no param name) so the alarm message
-    # reads cleanly: "Temperature in Peja is above 40 (...)".
     if "crit_high" in t and value > t["crit_high"]:
         return "CRITICAL", t["crit_high"], f"above {t['crit_high']}"
     if "crit_low" in t and value < t["crit_low"]:
@@ -130,8 +115,7 @@ def build_alarms(reading):
                     "battery_level": "%"}.get(param, "")
             message = f"{sev}: {param.replace('_', ' ').title()} in {reading['city']} is {frag} ({value}{unit})"
             alarms.append({
-                # str(uuid) -> the spark-cassandra connector parses it into the
-                # uuid column; passing a raw UUID object breaks schema inference.
+                
                 "alarm_id": str(uuid.uuid4()),
                 "sensor_id": reading["sensor_id"],
                 "city": reading["city"],
