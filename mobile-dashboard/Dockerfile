@@ -7,6 +7,9 @@ COPY mobile-dashboard/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY mobile-dashboard/ /app/
+# The LSTM forecaster + trained model live under stream-processing/; the mobile
+# API imports lstm_forecast and loads models/ from here at runtime.
+COPY stream-processing/ /app/stream-processing/
 
 EXPOSE 8600
 

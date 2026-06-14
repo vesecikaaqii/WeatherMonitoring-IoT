@@ -36,6 +36,7 @@ or:
 """
 
 import os
+from datetime import datetime, timezone, timedelta
 
 import requests
 from fastapi import FastAPI, Request
@@ -50,6 +51,10 @@ CASSANDRA_HOST = os.getenv("CASSANDRA_HOST", "127.0.0.1")
 KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "weather_ks")
 SIMULATOR_API_URL = os.getenv("SIMULATOR_API_URL", "http://localhost:8000")
 PORT = int(os.getenv("MOBILE_API_PORT", "8600"))
+
+# Fallback only: if the simulator API is unreachable, a sensor counts as
+# reporting when its most recent reading arrived within this many minutes.
+ACTIVE_WINDOW_MIN = int(os.getenv("ACTIVE_WINDOW_MIN", "10"))
 
 ALL_CITIES = ["Prishtina", "Prizren", "Peja", "Gjakova", "Mitrovica",
               "Gjilan", "Ferizaj", "Podujeva", "Vushtrri"]
@@ -103,6 +108,82 @@ def rows(cql):
 
 
 # --------------------------------------------------------------------------
+# Active-sensor counts: two complementary views (mirrors the web dashboard)
+#  - configured: what the simulator is set to produce now (real-time)
+#  - reporting : what actually wrote to Cassandra recently (pipeline output)
+# --------------------------------------------------------------------------
+def _parse_iso(ts):
+    """Parse an ISO timestamp (e.g. '2026-06-14T12:34:56Z') -> aware datetime."""
+    if not isinstance(ts, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def reporting_sensor_ids():
+    """Sensor_ids that wrote to latest_readings within ACTIVE_WINDOW_MIN."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=ACTIVE_WINDOW_MIN)
+    out = set()
+    for r in rows("SELECT sensor_id, timestamp FROM latest_readings"):
+        dt = _parse_iso(r.get("timestamp"))
+        if dt is not None and dt >= cutoff and r.get("sensor_id"):
+            out.add(r["sensor_id"])
+    return out
+
+
+def configured_sensor_ids():
+    """Sensor_ids the simulator is configured to produce now (real-time).
+
+    Selected cities capped by num_sensors, only while running. Falls back to the
+    Cassandra reporting set if the simulator API is unreachable.
+    """
+    try:
+        status = requests.get(f"{SIMULATOR_API_URL}/status", timeout=3).json()
+        cfg = requests.get(f"{SIMULATOR_API_URL}/config", timeout=3).json()
+        if (isinstance(status, dict) and "error" not in status
+                and isinstance(cfg, dict) and "error" not in cfg):
+            if not status.get("running"):
+                return set()
+            cities = [c for c in cfg.get("cities", ALL_CITIES) if c in SENSOR_MAP]
+            num = int(cfg.get("num_sensors", len(cities)))
+            return set(SENSOR_MAP[c] for c in cities[:max(num, 0)])
+    except Exception:
+        pass
+    return reporting_sensor_ids()
+
+
+# --------------------------------------------------------------------------
+# Temperature forecaster (same model as the web dashboard)
+# Loaded ONCE and reused; predicts server-side. Falls back to moving average
+# if TensorFlow / the trained model are absent (handled inside the forecaster).
+# --------------------------------------------------------------------------
+_forecaster = None
+
+
+def get_forecaster():
+    global _forecaster
+    if _forecaster is None:
+        import sys
+        # container: /app/stream-processing ; local: ../stream-processing
+        for p in (os.path.join(HERE, "..", "stream-processing"),
+                  os.path.join(HERE, "stream-processing"),
+                  "/app/stream-processing"):
+            if os.path.isdir(p):
+                sys.path.insert(0, p)
+                break
+        try:
+            from lstm_forecast import TemperatureForecaster
+            _forecaster = TemperatureForecaster.load_default()
+        except Exception as exc:
+            print(f"[mobile_api] forecaster unavailable: {exc}")
+            _forecaster = None
+    return _forecaster
+
+
+# --------------------------------------------------------------------------
 # Pages
 # --------------------------------------------------------------------------
 @app.get("/")
@@ -142,11 +223,15 @@ def overview():
         pass
 
     total_sensors = len(meta) if meta else len(ALL_CITIES)
-    active_sensors = sum(1 for m in meta if m.get("status") == "active")
+    # Active = configured by the simulator (real-time); Reporting = actually
+    # writing through Spark -> Cassandra. A gap flags a lagging/down pipeline.
+    active_sensors_simulator = len(configured_sensor_ids())
+    reporting_sensors_cassandra = len(reporting_sensor_ids())
 
     return {
         "total_sensors": total_sensors,
-        "active_sensors": active_sensors,
+        "active_sensors_simulator": active_sensors_simulator,
+        "reporting_sensors_cassandra": reporting_sensors_cassandra,
         "latest_readings": len(latest),
         "active_alarms": active_alarms,
         "avg_latency_ms": avg_latency,
@@ -262,6 +347,53 @@ def ai():
     # anomalous sensors first, then by city
     latest.sort(key=lambda r: (not bool(r.get("is_anomaly")), r.get("city") or ""))
     return JSONResponse({"flagged_count": len(flagged), "sensors": latest})
+
+
+@app.get("/api/forecast")
+def forecast(city: str = "Prishtina"):
+    """Next-temperature forecast for a city, using the SAME LSTM model as the
+    web dashboard (moving-average fallback if the model is absent)."""
+    sid = SENSOR_MAP.get(city)
+    if not sid:
+        return JSONResponse({"error": f"unknown city {city}"})
+
+    # Use the most recent date partition that has data for this sensor.
+    parts = rows("SELECT DISTINCT sensor_id, date FROM sensor_readings")
+    dates = sorted(
+        {p["date"] for p in parts if p.get("sensor_id") == sid and p.get("date")},
+        reverse=True,
+    )
+    if not dates:
+        return JSONResponse({"city": city, "sensor_id": sid,
+                             "series": [], "prediction": None, "mode": None})
+    date = dates[0]
+
+    hist = rows(
+        "SELECT timestamp, temperature FROM sensor_readings "
+        f"WHERE sensor_id='{sid}' AND date='{date}' LIMIT 200"
+    )
+    hist.sort(key=lambda r: r.get("timestamp") or "")
+    series = [float(r["temperature"]) for r in hist if r.get("temperature") is not None]
+
+    if len(series) < 3:
+        return JSONResponse({"city": city, "sensor_id": sid, "date": date,
+                             "series": series, "prediction": None, "mode": None})
+
+    f = get_forecaster()
+    if f is not None:
+        pred = f.predict_next(series)
+        mode = f.mode
+    else:
+        # Pure-Python fallback if the forecaster module could not be imported.
+        window = series[-10:]
+        pred = round(sum(window) / len(window), 2)
+        mode = "moving_average"
+
+    return JSONResponse({
+        "city": city, "sensor_id": sid, "date": date,
+        "series": series, "n": len(series),
+        "prediction": pred, "mode": mode,
+    })
 
 
 # --------------------------------------------------------------------------

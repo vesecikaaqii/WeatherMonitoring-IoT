@@ -42,6 +42,17 @@ SIMULATOR_API_PUBLIC_URL = os.getenv("SIMULATOR_API_PUBLIC_URL", "http://localho
 ALL_CITIES = ["Prishtina", "Prizren", "Peja", "Gjakova", "Mitrovica",
               "Gjilan", "Ferizaj", "Podujeva", "Vushtrri"]
 
+# Canonical city -> sensor_id map (one station per city).
+SENSOR_MAP = {
+    "Prishtina": "PR-001", "Prizren": "PZ-001", "Peja": "PE-001",
+    "Gjakova": "GJ-001", "Mitrovica": "MI-001", "Gjilan": "GL-001",
+    "Ferizaj": "FE-001", "Podujeva": "PD-001", "Vushtrri": "VU-001",
+}
+
+# Fallback only: if the simulator API is unreachable, a sensor counts as active
+# when its most recent reading arrived within this many minutes.
+ACTIVE_WINDOW_MIN = int(os.getenv("ACTIVE_WINDOW_MIN", "10"))
+
 st.set_page_config(page_title="Weather Monitoring IoT - Kosovo",
                    page_icon="🌤️", layout="wide")
 
@@ -64,6 +75,58 @@ def query_df(cql):
     except Exception as exc:
         st.warning(f"Cassandra query failed: {exc}")
         return pd.DataFrame()
+
+
+def configured_sensor_ids():
+    """Sensor_ids the simulator is CONFIGURED to produce right now (real-time).
+
+    Reads the simulator's live config — selected cities capped by num_sensors,
+    only while it is running. Reflects a config change immediately, with no wait
+    for stale rows to age out. Falls back to the Cassandra reporting set if the
+    simulator API is unreachable.
+    """
+    status = api_get("/status")
+    cfg = api_get("/config")
+    api_ok = (isinstance(status, dict) and "error" not in status
+              and isinstance(cfg, dict) and "error" not in cfg)
+    if api_ok:
+        if not status.get("running"):
+            return set()  # stopped -> nothing is producing
+        cities = [c for c in cfg.get("cities", ALL_CITIES) if c in SENSOR_MAP]
+        num = int(cfg.get("num_sensors", len(cities)))
+        return set(SENSOR_MAP[c] for c in cities[:max(num, 0)])
+    # API down -> best effort from what actually landed in Cassandra
+    return reporting_sensor_ids()
+
+
+def reporting_sensor_ids():
+    """Sensor_ids that actually wrote to latest_readings recently.
+
+    Recency-based (within ACTIVE_WINDOW_MIN) read of latest_readings — i.e. the
+    sensors whose data really flowed through Spark -> Cassandra, as opposed to
+    what the simulator is merely configured to send.
+    """
+    lr = query_df("SELECT sensor_id, timestamp FROM latest_readings")
+    if lr.empty or "timestamp" not in lr:
+        return set()
+    ts = pd.to_datetime(lr["timestamp"], utc=True, errors="coerce")
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=ACTIVE_WINDOW_MIN)
+    return set(lr.loc[ts >= cutoff, "sensor_id"].dropna().tolist())
+
+
+@st.cache_resource
+def get_forecaster():
+    """Load the trained LSTM forecaster ONCE (cached across reruns).
+
+    Loads the saved model from stream-processing/models/ if present; otherwise
+    returns a forecaster in moving-average fallback mode. Either way prediction
+    is fast — no training happens at render time.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__),
+                                    "..", "stream-processing"))
+    from lstm_forecast import TemperatureForecaster
+    return TemperatureForecaster.load_default()
 
 
 # --------------------------------------------------------------------------
@@ -109,8 +172,15 @@ def page_overview():
     latest = query_df("SELECT * FROM latest_readings")
     metrics = api_get("/metrics")
 
+    # Total = registered fleet size (static metadata table).
     total_sensors = len(meta) if not meta.empty else len(ALL_CITIES)
-    active_sensors = int((meta["status"] == "active").sum()) if not meta.empty else 0
+
+    # Two complementary counts:
+    #  - configured: what the simulator is set to produce now (real-time).
+    #  - reporting : what actually wrote to Cassandra recently (pipeline output).
+    # A gap between them points at the Spark -> Cassandra path lagging or down.
+    configured_sensors = len(configured_sensor_ids())
+    reporting_sensors = len(reporting_sensor_ids())
 
     # Count active alarms across all cities
     alarms = query_df("SELECT severity, status FROM alarms")
@@ -121,13 +191,19 @@ def page_overview():
     avg_latency = round(latest["latency_ms"].mean(), 1) if not latest.empty and "latency_ms" in latest else 0
     mps = metrics.get("messages_per_second", 0) if isinstance(metrics, dict) else 0
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Total sensors", total_sensors)
-    c2.metric("Active sensors", active_sensors)
-    c3.metric("Latest readings", len(latest))
-    c4.metric("Active alarms", active_alarms)
-    c5.metric("Avg latency (ms)", avg_latency)
-    c6.metric("Msg/s (live)", mps)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("Total sensors", total_sensors,
+              help="Registered in the sensor_metadata table (fleet size)")
+    c2.metric("Active sensors (simulator)", configured_sensors,
+              help="Real-time from the simulator config (selected cities × "
+                   "num_sensors); 0 when stopped")
+    c3.metric("Reporting sensors (Cassandra)", reporting_sensors,
+              help=f"Wrote to latest_readings within the last "
+                   f"{ACTIVE_WINDOW_MIN} min (Spark → Cassandra output)")
+    c4.metric("Latest readings", len(latest))
+    c5.metric("Active alarms", active_alarms)
+    c6.metric("Avg latency (ms)", avg_latency)
+    c7.metric("Msg/s (live)", mps)
 
     st.markdown("---")
     st.subheader("Latest reading per sensor")
@@ -384,15 +460,25 @@ def page_ai():
         st.info("No readings with anomaly flags yet.")
 
     st.markdown("---")
-    st.subheader("🌡️ Temperature forecast (moving average — LSTM-ready)")
-    st.caption(
-        "Read-only prediction generated automatically from the latest sensor "
-        "readings stored in Cassandra — this value is **not** entered manually "
-        "and is **not** random. The active method is a **moving average** of "
-        "the most recent readings; a Keras LSTM path exists in "
-        "`lstm_forecast.py` but is inactive unless TensorFlow is installed "
-        "(see the **Model** field below for the method actually used)."
-    )
+    st.subheader("🌡️ Temperature forecast (LSTM)")
+    forecaster = get_forecaster()
+    if forecaster.mode == "lstm":
+        st.caption(
+            "Read-only prediction from a trained **Keras LSTM** "
+            "(`lstm_forecast.py`), generated automatically from the latest "
+            "sensor readings in Cassandra — **not** entered manually and **not** "
+            "random. The model is trained offline (`train_lstm.py`) and only "
+            "loaded here, so rendering stays fast."
+        )
+    else:
+        st.caption(
+            "Read-only prediction generated automatically from the latest "
+            "sensor readings in Cassandra — **not** entered manually and "
+            "**not** random. The trained LSTM model was not found, so a "
+            "**moving-average** fallback is in use. Train it with "
+            "`python stream-processing/train_lstm.py` to enable the LSTM "
+            "(see the **Model** field below for the method actually used)."
+        )
     sensor_map = {
         "Prishtina": "PR-001", "Prizren": "PZ-001", "Peja": "PE-001",
         "Gjakova": "GJ-001", "Mitrovica": "MI-001", "Gjilan": "GL-001",
@@ -409,12 +495,7 @@ def page_ai():
         series = hist.sort_values("timestamp")["temperature"].dropna().tolist()
         if len(series) >= 3:
             try:
-                import sys
-                sys.path.insert(0, os.path.join(os.path.dirname(__file__),
-                                                "..", "stream-processing"))
-                from lstm_forecast import TemperatureForecaster
-                f = TemperatureForecaster()
-                f.fit(series)
+                f = forecaster
                 pred = f.predict_next(series)
                 # generated-at reflects this render; it recalculates on every
                 # rerun (city change / Refresh data / reload) using fresh data.
@@ -453,7 +534,10 @@ def page_metadata():
     st.title("Sensor Metadata")
     st.caption(
         "Static description of each weather station, read from the Cassandra "
-        "`sensor_metadata` table (manufacturer, model, serial number, etc.)."
+        "`sensor_metadata` table (manufacturer, model, serial number, etc.). "
+        "The **active_sim** column / KPI come from the simulator config "
+        "(real-time), while **reporting** counts sensors that actually wrote to "
+        "Cassandra recently — both independent of the static `status` field."
     )
 
     cols = [
@@ -476,11 +560,27 @@ def page_metadata():
     # Keep a stable column order and sort by sensor id
     meta = meta[[c for c in cols if c in meta.columns]].sort_values("sensor_id")
 
-    c1, c2 = st.columns(2)
-    c1.metric("Total sensors", len(meta))
-    c2.metric("Active sensors", int((meta["status"] == "active").sum()))
+    # Two independent live views, neither tied to the static `status` field:
+    #  - active_sim : configured to produce now (simulator, real-time)
+    #  - reporting  : actually wrote to Cassandra recently (pipeline output)
+    sim_ids = configured_sensor_ids()
+    rep_ids = reporting_sensor_ids()
+    meta["active_sim"] = meta["sensor_id"].isin(sim_ids)
+    meta["reporting"] = meta["sensor_id"].isin(rep_ids)
+    n_sim = int(meta["active_sim"].sum())
+    n_rep = int(meta["reporting"].sum())
 
-    # Optional status filter
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total sensors", len(meta),
+              help="Registered in sensor_metadata (fleet size)")
+    c2.metric("Active sensors (simulator)", n_sim,
+              help="Real-time from the simulator config (selected cities × "
+                   "num_sensors); 0 when stopped")
+    c3.metric("Reporting sensors (Cassandra)", n_rep,
+              help=f"Wrote to latest_readings within the last "
+                   f"{ACTIVE_WINDOW_MIN} min (Spark → Cassandra output)")
+
+    # Optional status filter (static metadata status)
     statuses = sorted(meta["status"].dropna().unique().tolist())
     chosen = st.multiselect("Filter by status", statuses, default=statuses)
     if chosen:

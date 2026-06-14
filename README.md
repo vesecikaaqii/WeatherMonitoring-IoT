@@ -60,7 +60,7 @@ web (Streamlit) and mobile (PWA) dashboards read from Cassandra.
 | Message queue | Apache Kafka (+ Zookeeper) |
 | Stream processing | Apache Spark Structured Streaming (PySpark) |
 | Storage | Apache Cassandra |
-| AI | scikit-learn IsolationForest (+ statistical fallback); moving-average temperature forecast with an optional, LSTM-ready Keras scaffold (inactive unless TensorFlow is installed) |
+| AI | scikit-learn IsolationForest (+ statistical fallback); Keras **LSTM** temperature forecast trained offline (moving-average fallback if the model/TensorFlow is absent) |
 | Dashboard (web) | Streamlit, pandas |
 | Dashboard (mobile) | FastAPI + responsive HTML/JS PWA |
 | Orchestration | Docker Compose |
@@ -89,6 +89,8 @@ WeatherMonitoring-IoT/
 │   ├── spark_processor.py       
 │   ├── ai_model.py              
 │   ├── lstm_forecast.py         
+│   ├── train_lstm.py            
+│   ├── models/                  
 │   ├── checkpoints/
 │   └── requirements.txt
 ├── frontend-dashboard/
@@ -110,16 +112,13 @@ WeatherMonitoring-IoT/
 ## Quick start (Docker — recommended)
 
 ```bash
-# 1. Configure environment
+
 cp .env.example .env
 
-# 2. Start infrastructure
 docker compose up -d zookeeper kafka cassandra
 
-# 3. Initialize Cassandra (wait ~45s for Cassandra to be ready first)
 docker exec -it cassandra cqlsh -f /scripts/cassandra_setup.cql
 
-# 4. Create Kafka topics
 docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic weather_data --partitions 6 --replication-factor 1
 
 docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic weather_alerts --partitions 3 --replication-factor 1
@@ -140,13 +139,12 @@ Start-Process "http://localhost:8501"
 
 Start-Process "http://localhost:8600"
 
-# 6. Seed sensor metadata (from host, needs cassandra-driver)
 CASSANDRA_HOST=127.0.0.1 python infrastructure/seed_metadata.py
 
-# 6b. (Optional, DEMO) Pre-fill 7 days of historical readings for the charts
 CASSANDRA_HOST=127.0.0.1 python infrastructure/seed_historical_readings.py
 
-# 7. Submit the Spark streaming job
+CASSANDRA_HOST=127.0.0.1 python stream-processing/train_lstm.py
+
 docker exec -it spark-master spark-submit \
   --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 \
   /app/stream-processing/spark_processor.py
@@ -164,28 +162,23 @@ Open the web dashboard at **http://localhost:8501**, the simulator API docs at
 Requires local Kafka + Cassandra (or point env vars at remote ones).
 
 ```bash
-# install everything
+
 pip install -r requirements.txt
 
-# environment for local hosts
 export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 export CASSANDRA_HOST=127.0.0.1
 export SIMULATOR_API_URL=http://localhost:8000
 
-# initialize storage / topics
 cqlsh -f infrastructure/cassandra_setup.cql
 bash infrastructure/kafka_topics.sh
 python infrastructure/seed_metadata.py
 
-# start the simulator API (terminal 1)
 python sensor-service/simulator_api.py
 
-# start Spark streaming (terminal 2)
 spark-submit \
   --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,com.datastax.spark:spark-cassandra-connector_2.12:3.5.0 \
   stream-processing/spark_processor.py
 
-# start the dashboard (terminal 3)
 streamlit run frontend-dashboard/app.py
 ```
 
@@ -242,12 +235,22 @@ pure-Python statistical/threshold check, so the pipeline never crashes.
 report impossible spikes. Anomaly detection separates genuine extreme-weather
 events from sensor faults, complementing the static alarm thresholds. Each
 reading is stored with an `is_anomaly` flag and shown on the **AI / Prediction**
-dashboard page. The next temperature value is predicted by a **moving-average
-forecast** (`lstm_forecast.py`). The same file contains an **LSTM-ready Keras
-scaffold** that activates only if TensorFlow is installed; TensorFlow is not a
-default dependency, so the forecast shown in the dashboard is the moving
-average. The dashboard's **Model** field always reports the method actually
-used.
+dashboard page. The next temperature value is predicted by a **Keras LSTM**
+(`lstm_forecast.py`). The model is **trained offline** by
+`stream-processing/train_lstm.py`, which pulls each sensor's historical
+temperature series from Cassandra, trains the LSTM, and saves it to
+`stream-processing/models/`. The dashboard only **loads** the saved model and
+predicts (no per-render training), so rendering stays fast. If TensorFlow or the
+trained model file is missing, the forecaster transparently falls back to a
+**moving average** — and the dashboard's **Model** field always reports the
+method actually used (`lstm` or `moving_average`), so it never overclaims. Both
+the web dashboard and the mobile **AI** tab (served by `/api/forecast`) load the
+*same* trained model, so forecasts are identical across clients.
+
+```bash
+
+CASSANDRA_HOST=127.0.0.1 python stream-processing/train_lstm.py
+```
 
 ## Alarm system
 
@@ -269,6 +272,24 @@ sensor type, installation date, status, sampling frequency) lives in the
 `sensor_metadata` table, seeded from `sensor-service/config.py` via
 `infrastructure/seed_metadata.py`. It is shown on the **Sensor Metadata** page
 (web dashboard) and the **Meta** tab (mobile).
+
+### Active vs reporting sensors
+
+The Overview (and Sensor Metadata) views show **two complementary live counts**,
+so a healthy pipeline is visible at a glance:
+
+- **Active sensors (simulator)** — how many sensors the simulator is *configured
+  to produce right now*. Read in **real time** from the simulator API
+  (`/status` + `/config`): the selected cities capped by `num_sensors`, or `0`
+  when stopped. It updates the instant you change the config — no waiting.
+- **Reporting sensors (Cassandra)** — how many sensors *actually wrote* to
+  `latest_readings` within the last `ACTIVE_WINDOW_MIN` minutes (default 10) —
+  i.e. data that really flowed through **Spark → Cassandra**.
+
+A gap (**Active > Reporting**) flags that the Spark → Cassandra path is lagging
+or down, even though the simulator is producing. Both the web dashboard and the
+mobile **Overview** tab show the pair; the static `status` field in
+`sensor_metadata` is no longer used for these counts.
 
 ## Spark processing & windowed aggregation
 
@@ -354,12 +375,12 @@ only needs one URL.
 
 - Open **http://localhost:8600** (or `http://<server-ip>:8600` from a phone).
 - **Full feature parity with the web dashboard.** Tabs:
-  - **Overview** — KPIs (sensors, alarms, latency, msg/s)
+  - **Overview** — KPIs: active (simulator) + reporting (Cassandra) sensors, alarms, latency, msg/s
   - **Sensors** — latest reading per city with severity colors
   - **Meta** — sensor metadata (manufacturer, model, serial, install date…)
   - **Trends** — historical SVG line charts + daily summary + alarms per city
   - **Alarms** — filter WARNING / CRITICAL
-  - **AI** — anomaly-flagged sensors + temperature forecast (moving average)
+  - **AI** — anomaly-flagged sensors + LSTM temperature forecast (moving-average fallback)
   - **Perf** — Spark Streaming & Stress Test metrics (msg/s + latency charts)
   - **Control** — start/stop, full config (mode, sensors, interval, msg/s,
     anomaly rate, cities) **and** stress test
@@ -373,33 +394,29 @@ infrastructure + data must be up first.
 
 **Option A — Docker (recommended)**
 ```bash
-# 1. Config (first time only)
+
 cp .env.example .env
 
-# 2. Start infrastructure, wait ~45s for Cassandra
 docker compose up -d zookeeper kafka cassandra
 
-# 3. Create the Cassandra schema (5 tables)
 docker exec -it cassandra cqlsh -f /scripts/cassandra_setup.cql
 
-# 4. Create Kafka topics
 docker exec -it kafka bash /scripts/kafka_topics.sh
 
-# 5. Start simulator-api + mobile-dashboard (+ web + Spark)
 docker compose up -d --build simulator-api mobile-dashboard dashboard spark-master spark-worker
 
-# 6. Seed metadata + historical data (so charts/AI have data)
 CASSANDRA_HOST=127.0.0.1 python infrastructure/seed_metadata.py
 CASSANDRA_HOST=127.0.0.1 python infrastructure/seed_historical_readings.py
 
-# 7. Start live data production
+CASSANDRA_HOST=127.0.0.1 python stream-processing/train_lstm.py
+
 curl -X POST http://localhost:8000/start
 ```
 
 **Open it on a phone**
 ```bash
 
-ipconfig            # Windows  -> look for "IPv4 Address", e.g. 192.168.1.20
+ipconfig           
 
 ```
 - Computer: **http://localhost:8600**

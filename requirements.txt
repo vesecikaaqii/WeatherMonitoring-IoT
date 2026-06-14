@@ -14,7 +14,7 @@ pydantic==2.6.4
 pyspark==3.5.0
 scikit-learn==1.4.1.post1
 numpy==1.26.4
-# tensorflow==2.16.1   # optional, enables real LSTM forecast
+tensorflow==2.16.1   # real LSTM temperature forecast (train_lstm.py)
 
 # --- Dashboard ---
 streamlit==1.33.0

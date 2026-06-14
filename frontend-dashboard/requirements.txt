@@ -3,3 +3,7 @@ streamlit==1.33.0
 pandas==2.2.1
 cassandra-driver==3.29.1
 requests==2.31.0
+# LSTM temperature forecast: load the trained Keras model and predict.
+# If these are removed, the dashboard falls back to a moving average.
+numpy==1.26.4
+tensorflow==2.16.1

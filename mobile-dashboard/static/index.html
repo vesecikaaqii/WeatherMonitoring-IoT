@@ -136,7 +136,8 @@
       const d = await getJSON("/api/overview") || {};
       return `<div class="grid">
         ${kpi(d.total_sensors, "Total sensors")}
-        ${kpi(d.active_sensors, "Active sensors")}
+        ${kpi(d.active_sensors_simulator, "Active (simulator)")}
+        ${kpi(d.reporting_sensors_cassandra, "Reporting (Cassandra)")}
         ${kpi(d.active_alarms, "Active alarms")}
         ${kpi(d.latest_readings, "Latest readings")}
         ${kpi(d.avg_latency_ms, "Avg latency (ms)")}
@@ -343,25 +344,21 @@
         <div class="v">${flagged}</div>
         <div class="l">sensors flagged anomalous (latest)</div></div>`;
 
-      // Temperature forecast (moving average of recent readings) for chosen city
-      const sid = SENSOR_MAP[AI_CITY];
-      const dates = await getJSON("/api/dates?sensor_id=" + sid) || [];
+      // Temperature forecast for chosen city — uses the SAME server-side LSTM
+      // model as the web dashboard (moving-average fallback when absent).
       const citySel = `<div class="filters"><select onchange="changeAICity(this.value)">` +
         CITIES().map(c => `<option ${c === AI_CITY ? "selected" : ""}>${c}</option>`).join("") +
         `</select></div>`;
       let forecastCard = `<p class="muted">No history yet for a forecast.</p>`;
-      if (dates.length) {
-        const hist = await getJSON(`/api/history?sensor_id=${sid}&date=${dates[0]}`) || [];
-        const temps = hist.map(r => Number(r.temperature)).filter(v => !isNaN(v));
-        if (temps.length >= 3) {
-          const w = temps.slice(-10);
-          const pred = w.reduce((a, b) => a + b, 0) / w.length;
-          forecastCard = `<div class="card" style="margin-bottom:10px">
-            <div class="l">Temperature forecast — ${AI_CITY}</div>
-            <div class="v">${pred.toFixed(2)} °C</div>
-            <div class="meta">moving average of last ${w.length} readings • ${dates[0]}</div>
-            ${sparkline(temps, "#f59e0b")}</div>`;
-        }
+      const fc = await getJSON("/api/forecast?city=" + encodeURIComponent(AI_CITY)) || {};
+      if (fc.prediction != null) {
+        const temps = fc.series || [];
+        const modeLabel = fc.mode === "lstm" ? "LSTM" : "moving average";
+        forecastCard = `<div class="card" style="margin-bottom:10px">
+          <div class="l">Temperature forecast — ${AI_CITY}</div>
+          <div class="v">${Number(fc.prediction).toFixed(2)} °C</div>
+          <div class="meta">model: ${modeLabel} • based on ${fc.n} readings • ${fc.date}</div>
+          ${sparkline(temps, "#f59e0b")}</div>`;
       }
 
       const list = sensors.map(r => `

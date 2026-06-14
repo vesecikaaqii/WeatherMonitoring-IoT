@@ -1,0 +1,6 @@
+# Trained LSTM artifacts are written here by train_lstm.py:
+#   lstm_temperature.keras         (Keras model)
+#   lstm_temperature.scaler.json   (min/max + lookback)
+# This folder is intentionally kept in git so the frontend Docker image has a
+# place to receive the model; the dashboard falls back to a moving average if
+# the model files are absent.
